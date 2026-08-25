@@ -1,0 +1,300 @@
+//! Direct Linux/macOS -> watch BLE GATT link (btleplug: BlueZ on Linux, CoreBluetooth on macOS).
+//!
+//! GATT layout (see `protocol/THEME_PROTOCOL.md`):
+//!
+//! | characteristic | uuid             | props                | payload            |
+//! |----------------|------------------|----------------------|--------------------|
+//! | Theme State    | `7e450002-…`     | write, read          | ThemeState packet  |
+//! | Status         | `7e450003-…`     | read, notify         | 6-byte Status      |
+//! | Control        | `7e450004-…`     | notify               | 4-byte Control     |
+//! | Info           | `7e450005-…`     | read                 | 4-byte Info        |
+//!
+//! The write is "with response" so the stack does an ATT long write automatically when the
+//! packet does not fit in `MTU - 3`; no application-level fragmentation exists.
+
+use std::pin::Pin;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, Context, Result};
+use btleplug::api::{Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter, ValueNotification, WriteType};
+use btleplug::platform::{Adapter, Manager, Peripheral};
+use futures::Stream;
+use uuid::{uuid, Uuid};
+
+use crate::protocol::{self, Info, Status, StatusCode};
+
+pub const SERVICE_UUID: Uuid = uuid!("7e450001-5029-4337-8dde-aaefb009b2df");
+pub const CHR_THEME_STATE: Uuid = uuid!("7e450002-5029-4337-8dde-aaefb009b2df");
+pub const CHR_STATUS: Uuid = uuid!("7e450003-5029-4337-8dde-aaefb009b2df");
+pub const CHR_CONTROL: Uuid = uuid!("7e450004-5029-4337-8dde-aaefb009b2df");
+pub const CHR_INFO: Uuid = uuid!("7e450005-5029-4337-8dde-aaefb009b2df");
+
+#[derive(Debug, Clone)]
+pub struct BleOptions {
+    /// Only accept a watch whose advertised name matches (otherwise: any device advertising
+    /// the Theme service).
+    pub name: Option<String>,
+    pub scan_timeout: Duration,
+}
+
+impl Default for BleOptions {
+    fn default() -> Self {
+        BleOptions { name: std::env::var("OMAWATCH_NAME").ok().filter(|s| !s.is_empty()), scan_timeout: Duration::from_secs(8) }
+    }
+}
+
+pub async fn adapter() -> Result<Adapter> {
+    let manager = Manager::new().await.context("initialising the Bluetooth stack")?;
+    manager
+        .adapters()
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no Bluetooth adapter found"))
+}
+
+#[derive(Debug, Clone)]
+pub struct Seen {
+    pub name: Option<String>,
+    pub id: String,
+    pub rssi: Option<i16>,
+    pub has_service: bool,
+}
+
+/// One scan window; everything seen, with a flag for the ones advertising our service.
+pub async fn scan(adapter: &Adapter, timeout: Duration) -> Result<Vec<Seen>> {
+    adapter.start_scan(ScanFilter::default()).await.context("starting BLE scan")?;
+    tokio::time::sleep(timeout).await;
+    let mut out = Vec::new();
+    for p in adapter.peripherals().await? {
+        if let Ok(Some(props)) = p.properties().await {
+            out.push(Seen {
+                name: props.local_name,
+                id: p.id().to_string(),
+                rssi: props.rssi,
+                has_service: props.services.contains(&SERVICE_UUID),
+            });
+        }
+    }
+    let _ = adapter.stop_scan().await;
+    Ok(out)
+}
+
+/// Find a watch advertising the Theme service (optionally by name). Polls the adapter's
+/// device list rather than the event stream: simpler, and identical on BlueZ/CoreBluetooth.
+pub async fn discover(adapter: &Adapter, opts: &BleOptions) -> Result<Peripheral> {
+    discover_service(adapter, opts, SERVICE_UUID).await
+}
+
+pub async fn discover_service(adapter: &Adapter, opts: &BleOptions, service: Uuid) -> Result<Peripheral> {
+    adapter
+        .start_scan(ScanFilter { services: vec![service] })
+        .await
+        .context("starting BLE scan (is Bluetooth powered on?)")?;
+    let deadline = Instant::now() + opts.scan_timeout;
+    let result = loop {
+        let mut found = None;
+        for p in adapter.peripherals().await? {
+            let Ok(Some(props)) = p.properties().await else { continue };
+            let by_service = props.services.contains(&service);
+            let by_name = match (&opts.name, &props.local_name) {
+                (Some(want), Some(have)) => want == have,
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            // A name match alone is accepted only when the caller asked for a specific name
+            // and the stack surfaced no service list at all (scan-response-only names).
+            if (by_service && by_name) || (opts.name.is_some() && by_name && props.services.is_empty()) {
+                found = Some(p);
+                break;
+            }
+        }
+        if let Some(p) = found {
+            break Ok(p);
+        }
+        if Instant::now() >= deadline {
+            break Err(anyhow!(
+                "no watch advertising {} found within {:?}{}",
+                SERVICE_UUID,
+                opts.scan_timeout,
+                opts.name.as_ref().map(|n| format!(" (name filter: {n:?})")).unwrap_or_default()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let _ = adapter.stop_scan().await;
+    result
+}
+
+pub struct Watch {
+    peripheral: Peripheral,
+    theme: Characteristic,
+    status: Option<Characteristic>,
+    control: Option<Characteristic>,
+    info: Option<Characteristic>,
+    pub name: String,
+}
+
+impl Watch {
+    /// Connect and resolve the Theme service characteristics.
+    pub async fn connect(peripheral: Peripheral) -> Result<Watch> {
+        if !peripheral.is_connected().await.unwrap_or(false) {
+            peripheral.connect().await.context("connecting to the watch")?;
+        }
+        peripheral.discover_services().await.context("discovering GATT services")?;
+        let chars = peripheral.characteristics();
+        let find = |uuid: Uuid| chars.iter().find(|c| c.uuid == uuid).cloned();
+        let theme = find(CHR_THEME_STATE).ok_or_else(|| {
+            anyhow!("connected, but the device has no Theme State characteristic {CHR_THEME_STATE} — wrong device or old firmware")
+        })?;
+        let name = peripheral
+            .properties()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.local_name)
+            .unwrap_or_else(|| peripheral.id().to_string());
+        Ok(Watch { theme, status: find(CHR_STATUS), control: find(CHR_CONTROL), info: find(CHR_INFO), peripheral, name })
+    }
+
+    pub async fn is_connected(&self) -> bool {
+        self.peripheral.is_connected().await.unwrap_or(false)
+    }
+
+    pub async fn disconnect(&self) {
+        let _ = self.peripheral.disconnect().await;
+    }
+
+    pub async fn info(&self) -> Result<Option<Info>> {
+        match &self.info {
+            None => Ok(None),
+            Some(c) => Ok(Some(Info::decode(&self.peripheral.read(c).await.context("reading Info")?)?)),
+        }
+    }
+
+    pub async fn status(&self) -> Result<Option<Status>> {
+        match &self.status {
+            None => Ok(None),
+            Some(c) => Ok(Some(Status::decode(&self.peripheral.read(c).await.context("reading Status")?)?)),
+        }
+    }
+
+    /// Read back the last ThemeState the watch holds (what it would show after a reboot).
+    pub async fn read_theme(&self) -> Result<Vec<u8>> {
+        self.peripheral.read(&self.theme).await.context("reading Theme State")
+    }
+
+    /// Write a ThemeState packet and confirm it via Status (crc of the applied packet).
+    /// If the firmware has no Status characteristic the write itself is the ack.
+    pub async fn send_theme(&self, packet: &[u8]) -> Result<Option<Status>> {
+        if packet.len() > protocol::MAX_PACKET_LEN {
+            bail!("packet is {} bytes, the watch accepts at most {}", packet.len(), protocol::MAX_PACKET_LEN);
+        }
+        let write_type = if self.theme.properties.contains(CharPropFlags::WRITE) {
+            WriteType::WithResponse
+        } else {
+            WriteType::WithoutResponse
+        };
+        self.peripheral.write(&self.theme, packet, write_type).await.context("writing Theme State")?;
+        let Some(status) = self.status().await? else { return Ok(None) };
+        let expected = u16::from_le_bytes([packet[packet.len() - 2], packet[packet.len() - 1]]);
+        match status.result {
+            StatusCode::Ok if status.applied_crc == expected => Ok(Some(status)),
+            StatusCode::Ok => bail!(
+                "watch reports OK but for crc {:#06x}, we sent {:#06x} (stale status?)",
+                status.applied_crc,
+                expected
+            ),
+            other => bail!("watch rejected the theme: {other:?}"),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn has_control(&self) -> bool {
+        self.control.is_some()
+    }
+
+    /// Subscribe to the Control characteristic (watch -> desktop requests) and Status.
+    /// Returns the merged notification stream; filter on `uuid`.
+    pub async fn subscribe(&self) -> Result<Pin<Box<dyn Stream<Item = ValueNotification> + Send>>> {
+        if let Some(c) = &self.control {
+            self.peripheral.subscribe(c).await.context("subscribing to Control")?;
+        }
+        if let Some(c) = &self.status {
+            self.peripheral.subscribe(c).await.context("subscribing to Status")?;
+        }
+        Ok(self.peripheral.notifications().await?)
+    }
+}
+
+/// Discover + connect with retries. `attempts == 0` means forever.
+pub async fn connect_with_retry(adapter: &Adapter, opts: &BleOptions, attempts: u32, log: impl Fn(&str)) -> Result<Watch> {
+    let mut delay = Duration::from_millis(500);
+    let mut n = 0u32;
+    loop {
+        n += 1;
+        let step = async {
+            let p = discover(adapter, opts).await?;
+            Watch::connect(p).await
+        };
+        match step.await {
+            Ok(w) => return Ok(w),
+            Err(e) if attempts == 0 || n < attempts => {
+                log(&format!("attempt {n}: {e:#}; retrying in {delay:?}"));
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(15));
+            }
+            Err(e) => return Err(e.context(format!("giving up after {n} attempts"))),
+        }
+    }
+}
+
+// ---- "mini" wire adapter --------------------------------------------------------------
+// The onewheel watch's first prototype firmware (main/ble.c there) speaks a 13-byte format
+// on a different service; this adapter lets the same host pipeline drive it. It is the
+// existence proof that the source-side code does not care what the watch speaks.
+//
+//   service  7a0e0001-0f0e-4d0c-9c0b-0a0908070605
+//   colors   7a0e0002-…  write/read: [ver=1][bg rgb][fg rgb][accent rgb][color1 rgb]
+//   name     7a0e0003-…  write/read: UTF-8, <= 31 bytes
+
+pub const MINI_SERVICE_UUID: Uuid = uuid!("7a0e0001-0f0e-4d0c-9c0b-0a0908070605");
+pub const MINI_CHR_COLORS: Uuid = uuid!("7a0e0002-0f0e-4d0c-9c0b-0a0908070605");
+pub const MINI_CHR_NAME: Uuid = uuid!("7a0e0003-0f0e-4d0c-9c0b-0a0908070605");
+
+/// Map the watch palette onto the four colours the mini format carries.
+pub fn mini_wire(p: &crate::palette::WatchPalette) -> [u8; 13] {
+    use crate::palette::Role;
+    let mut w = [0u8; 13];
+    w[0] = 1;
+    for (i, role) in [Role::Background, Role::TextPrimary, Role::Accent, Role::Danger].iter().enumerate() {
+        let c = p.get(*role);
+        w[1 + 3 * i] = c.r;
+        w[2 + 3 * i] = c.g;
+        w[3 + 3 * i] = c.b;
+    }
+    w
+}
+
+/// Connect, write colours + name, read the colours back. Returns the read-back bytes.
+pub async fn send_mini(peripheral: &Peripheral, wire: &[u8; 13], name: &str) -> Result<[u8; 13]> {
+    if !peripheral.is_connected().await.unwrap_or(false) {
+        peripheral.connect().await.context("connecting to the watch")?;
+    }
+    peripheral.discover_services().await.context("discovering GATT services")?;
+    let chars = peripheral.characteristics();
+    let colors = chars.iter().find(|c| c.uuid == MINI_CHR_COLORS).cloned().ok_or_else(|| anyhow!("no mini colors characteristic"))?;
+    let name_chr = chars.iter().find(|c| c.uuid == MINI_CHR_NAME).cloned();
+    peripheral.write(&colors, wire, WriteType::WithResponse).await.context("writing mini colors")?;
+    if let Some(nc) = name_chr {
+        let n: String = name.chars().take_while({ let mut len = 0; move |c| { len += c.len_utf8(); len <= 31 } }).collect();
+        peripheral.write(&nc, n.as_bytes(), WriteType::WithResponse).await.context("writing mini name")?;
+    }
+    let back = peripheral.read(&colors).await.context("reading mini colors back")?;
+    let mut out = [0u8; 13];
+    if back.len() != 13 {
+        bail!("read back {} bytes, expected 13", back.len());
+    }
+    out.copy_from_slice(&back);
+    Ok(out)
+}

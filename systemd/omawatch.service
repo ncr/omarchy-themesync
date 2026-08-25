@@ -1,0 +1,18 @@
+# User service: keep the BLE link to the watch open and act on its requests.
+#   cp systemd/omawatch.service ~/.config/systemd/user/
+#   systemctl --user enable --now omawatch
+# Needs bluez running; `omawatch sync` (from the hook) then goes through the daemon's
+# socket instead of opening its own BLE connection.
+[Unit]
+Description=Omarchy theme -> smartwatch bridge (omawatch daemon)
+After=bluetooth.target graphical-session.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/omawatch daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

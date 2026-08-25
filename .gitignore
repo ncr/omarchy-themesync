@@ -1,0 +1,4 @@
+host/target/
+watch/sim/theme_sim
+*.o
+.DS_Store

@@ -1,0 +1,24 @@
+[package]
+name = "omawatch"
+version = "0.1.0"
+edition = "2021"
+description = "Sync the active Omarchy desktop theme to a smartwatch over BLE (Theme Protocol v1)"
+license = "MIT"
+
+[[bin]]
+name = "omawatch"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "process", "signal"] }
+btleplug = "0.12"
+futures = "0.3"
+uuid = "1"
+
+[profile.release]
+strip = true
+lto = "thin"

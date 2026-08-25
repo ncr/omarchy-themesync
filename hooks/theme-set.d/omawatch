@@ -1,0 +1,14 @@
+#!/bin/bash
+# Omarchy theme-set hook -> push the new theme to the watch.
+#
+# Install:  omawatch install-hook        (writes this file with the absolute path baked in)
+#     or:   omarchy hook install theme-set hooks/theme-set.d/omawatch
+#
+# Omarchy (v4.0.1) runs every ~/.config/omarchy/hooks/theme-set.d/* as `bash <file> <slug>`,
+# synchronously, after the theme directory swap and after all app retints. So this must
+# return immediately: `sync --async` re-execs omawatch detached; that process hands the job
+# to the running daemon over its socket (open BLE link, ~100 ms) or, with no daemon, opens
+# a one-shot BLE connection with retries.
+OMAWATCH="${OMAWATCH_BIN:-omawatch}"
+command -v "$OMAWATCH" >/dev/null 2>&1 || exit 0
+"$OMAWATCH" sync --async >/dev/null 2>&1 || true
