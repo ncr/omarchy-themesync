@@ -48,11 +48,12 @@ host/                    Rust crate `omarchy-themesync`, binary `themesync`
   src/palette.rs           Rgb, SourcePalette (Omarchy vocabulary), WatchPalette (14 roles), map_source()
   src/protocol.rs          Theme Protocol v1 encode/decode + the watch's v2 TLV codec, crc16
   src/beacon.rs            state beacon / request packets, HMAC, pairing key
+  src/themelist.rs         the theme list pushed over GATT (list bytes, BEGIN/DATA/COMMIT frames, status)
   src/transport/ble.rs     GATT client (v2 / 13-byte packets on 7a0e0001; v1 on 7e450001)
   src/transport/adv.rs     BlueZ advertising + passive scan (bluer)
   src/transport/ipc.rs     hook → daemon Unix socket
   src/transport/sim.rs     simulated watch receiver
-  src/daemon.rs            beacon + request scanner + socket for the hook (+ GATT fallback)
+  src/daemon.rs            beacon + request scanner + socket for the hook (+ GATT fallback, list push); Linux only
   tests/fixtures/*.toml    real Omarchy themes (dark + light) for the tests
 protocol/BEACON.md           connection-less sync over advertising (agreed with the watch side)
 protocol/THEME_PROTOCOL.md   Theme Protocol v1 (earlier design, not deployed)
@@ -68,7 +69,7 @@ docs/                        omarchy.md (verification), prior-art.md, hardware.m
 #### Try it without hardware
 
 ```bash
-cd host && cargo build && cargo test                     # 26 tests: resolver parity, mapping, protocol, sim
+cd host && cargo build && cargo test                     # 40 tests: resolver parity, mapping, protocol, beacon, list, sim
 ./target/debug/themesync demo --file tests/fixtures/tokyo-night.toml
 ./target/debug/themesync theme --file tests/fixtures/catppuccin-latte.toml --contrast
 ./target/debug/themesync encode --file tests/fixtures/gruvbox.toml          # annotated packet
@@ -90,7 +91,8 @@ themesync daemon                            # state beacon + request scanner (pr
 systemctl --user enable --now themesync     # the daemon as a user service (systemd/themesync.service); after code changes:
                                             #   cargo install --path host && systemctl --user restart themesync
 themesync pair                              # new key over GATT + a 2-digit code you confirm on the watch's Pairing screen
-themesync status                            # daemon state (seq, key, last request)
+themesync status                            # daemon state (seq, key, last request, last list push)
+themesync push-list [--force] [--dry-run]   # the installed themes to the watch over GATT (7a0e0006), for its picker
 themesync next | prev                       # desktop-side theme stepping (what the watch requests trigger)
 themesync sync --proto mini                 # the 13-byte core-four packet instead
 themesync scan / sync --proto v1 / encode / decode / demo   # Theme Protocol v1 tooling (no device speaks it)
@@ -112,7 +114,13 @@ Omarchy themes have no light/dark pairs). No time and no counters in
 any packet. Pairing (§2b): `themesync pair` hands the daemon a *pending* key, writes
 `[0x01][code][key]` to the watch over GATT and prints the two-digit code; the watch shows a
 roller screen, and a request signed with the new key (the watch's RESEND after a correct
-code) makes it the active key — a wrong code changes nothing on either side. The firmware side (beacon receive, request sender, key characteristic
+code) makes it the active key — a wrong code changes nothing on either side. **Theme list
+(§3):** the installed themes as v2 packets (`[ver][count]` + `[len][packet]`*, slug as the
+name, `omarchy-theme-list` order) go to characteristic `…0006` in BEGIN/DATA/COMMIT frames
+sized to the negotiated MTU, the COMMIT keyed with the pairing key; the daemon pushes it
+right after a pairing completes, when the watch sends a LIST request (op `0x06`), and on
+`themesync push-list` (`--dry-run` prints the frames). The watch stores it on its SD card
+and shows it as a tappable picker (tap = SET). The firmware side (beacon receive, request sender, key characteristic
 `…0005`) is agreed but not built yet; until then the daemon also pushes every change over a
 one-shot GATT connection (`--no-gatt` disables that). Theme Protocol v1 (`7e450001-…`) is
 the earlier design and is not on any device.
@@ -121,7 +129,19 @@ Firmware side of the v1 design: `watch/esp32-lvgl/INTEGRATION.md`.
 
 #### Status (2026-08-26)
 
-* Host: 32 unit tests (v1 protocol, v2 codec, beacon packets/MAC, mapping, resolver parity).
+* Host: 40 unit tests (v1 protocol, v2 codec, beacon packets/MAC, theme list + frames,
+  mapping, resolver parity). Builds on Linux and macOS; the daemon (BlueZ over D-Bus) is
+  compiled in on Linux only, the GATT commands (`sync --direct`, `push-list --direct`,
+  `pair`) work on both.
+* Theme list push (2026-08-26): desktop side done (`themelist.rs`, `push-list`, the daemon
+  triggers); the watch firmware (`github.com/ncr/onewheel` `ce199f8`, `8b724c1`: `…0006`,
+  op `0x06`, the SD-backed list, the picker UI) is flashed and the whole loop — pair, code,
+  post-pairing list push (22 themes, 1231 B), swipe, pick, LIST refresh — is verified on the
+  hardware from a Mac with a Python mock of the daemon; both sides agree on the interop
+  vector in `protocol/BEACON.md` §3a. Not yet run end to end from the Linux box — the watch's NVS
+  was erased for that work, so `themesync pair` is needed again first (which also exercises
+  the post-pairing push). The watch is local-first: it repaints from its list on a swipe or
+  pick and then sends the request; the beacon confirms, and wins if the orders differ.
 * On this Omarchy box over BlueZ: `omarchy theme set <x>` → hook → `themesync sync --async`
   → daemon socket (or one-shot GATT without a daemon) → watch log
   `theme: set over BLE … name: '<x>'`, about 3 s after the desktop retint. Full v2 palette

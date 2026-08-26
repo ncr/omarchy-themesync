@@ -18,9 +18,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net",
 btleplug = "0.12"
 futures = "0.3"
 uuid = "1"
-bluer = { version = "0.17.4", features = ["bluetoothd"] }
 hmac = "0.13.0"
 sha2 = "0.11.0"
+
+# The daemon (state beacon + request scan) talks to BlueZ over D-Bus: Linux only. Everything
+# else (GATT via btleplug, the codecs, `push-list --direct`) builds and runs on macOS too.
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17.4", features = ["bluetoothd"] }
 
 [profile.release]
 strip = true

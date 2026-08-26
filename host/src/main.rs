@@ -8,14 +8,20 @@
 //! themesync sync [--file F] [--direct] [--proto v2|mini|v1]     push to the watch (daemon or one-shot GATT)
 //! themesync daemon [--no-gatt]                                  state beacon + request scanner (protocol/BEACON.md)
 //! themesync pair                                                pairing key for beacon requests
+//! themesync push-list [--force] [--dry-run] [--direct]          the theme list over GATT (protocol/BEACON.md §3)
 //! themesync scan / status / next / prev / install-hook
 //! ```
 
+// The beacon/request helpers are only called by the daemon, which is Linux-only.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 mod beacon;
+#[cfg(target_os = "linux")]
 mod daemon;
 mod omarchy;
 mod palette;
 mod protocol;
+mod themelist;
 mod transport;
 
 use std::io::{IsTerminal, Read, Write};
@@ -141,6 +147,26 @@ enum Cmd {
         /// Only write ~/.config/themesync/key; skip the watch.
         #[arg(long)]
         no_watch: bool,
+    },
+    /// Push the list of installed themes to the watch over GATT (7a0e0006), so it can show a picker.
+    PushList {
+        #[command(flatten)]
+        ble: BleArgs,
+        /// Send even if the watch reports it already holds this list (same crc).
+        #[arg(long)]
+        force: bool,
+        /// Print the list and the BEGIN/DATA/COMMIT frames instead of connecting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the daemon and open a one-shot BLE connection (key from ~/.config/themesync/key).
+        #[arg(long)]
+        direct: bool,
+        /// DATA frame size in bytes (default: the negotiated MTU - 3, at most 509; --dry-run: 509).
+        #[arg(long)]
+        frame: Option<usize>,
+        /// Find + connect + push attempts before giving up (--direct).
+        #[arg(long, default_value_t = 3)]
+        retries: u32,
     },
     /// List nearby BLE devices, flagging the ones advertising the Theme service.
     Scan {
@@ -398,7 +424,10 @@ async fn main() -> Result<()> {
                 sync_gatt(&src, &ble.options(), retries, &proto).await?;
             }
         }
+        #[cfg(target_os = "linux")]
         Cmd::Daemon { ble, no_gatt } => daemon::run(daemon::Options { ble: ble.options(), gatt: !no_gatt }).await?,
+        #[cfg(not(target_os = "linux"))]
+        Cmd::Daemon { .. } => bail!("the daemon needs BlueZ (Linux): advertising and passive scanning go through D-Bus"),
         Cmd::Pair { ble, no_watch } => {
             let key = beacon::new_key().context("reading /dev/urandom")?;
             if no_watch {
@@ -445,6 +474,76 @@ async fn main() -> Result<()> {
                     println!("If the watch showed \"paired\", nothing is lost: the daemon keeps the pending key and the");
                     println!("watch's next request completes the pairing. If it showed \"wrong code\", run `themesync pair` again.");
                     break;
+                }
+            }
+        }
+        Cmd::PushList { ble, force, dry_run, direct, frame, retries } => {
+            let key = beacon::load_key();
+            if dry_run {
+                let om = Omarchy::from_env()?;
+                let built = themelist::build(&om);
+                for (slug, why) in &built.skipped {
+                    eprintln!("skipping {slug}: {why}");
+                }
+                if built.slugs.is_empty() {
+                    bail!("no Omarchy themes found under {} or {}", om.user_themes.display(), om.system_themes.display());
+                }
+                println!("list: {} themes, {} bytes, crc {:#06x} (omarchy-theme-list order)", built.slugs.len(), built.bytes.len(), built.crc());
+                for (i, (slug, packet)) in built.slugs.iter().zip(themelist::decode_list(&built.bytes)?).enumerate() {
+                    let d = protocol::decode_v2(&packet)?;
+                    println!("  {i:>2} {slug:<24} {:>3} B  {} roles  {}  bg {} fg {} accent {}", packet.len(), d.colors.len(), if d.is_light() { "light" } else { "dark " }, d.get(palette::Role::Background).unwrap().to_hex(), d.get(palette::Role::TextPrimary).unwrap().to_hex(), d.get(palette::Role::Accent).unwrap().to_hex());
+                }
+                let (key, keyed) = match key {
+                    Some(k) => (k, true),
+                    None => (([0u8; beacon::KEY_LEN]), false),
+                };
+                let frames = themelist::frames(&built.bytes, &key, frame.unwrap_or(themelist::MAX_FRAME));
+                println!("frames ({} writes to {}):", frames.len(), ble::MINI_CHR_LIST);
+                for f in &frames {
+                    println!("  {:<34} {}", themelist::describe_frame(f), protocol::to_hex(f));
+                }
+                if !keyed {
+                    println!("(no pairing key in {}: the COMMIT mac above is computed with an all-zero key)", beacon::key_path().display());
+                }
+                return Ok(());
+            }
+            if !direct {
+                match ipc::request(&Request::PushList { force }, Duration::from_secs(90)).await? {
+                    Some(r) if r.ok => {
+                        println!("via daemon{}: {}", r.watch.map(|w| format!(" (watch {w})")).unwrap_or_default(), r.message.unwrap_or_default());
+                        return Ok(());
+                    }
+                    Some(r) => bail!("daemon: {}", r.message.unwrap_or_default()),
+                    None => {}
+                }
+            }
+            let Some(key) = key else {
+                bail!("no pairing key in {} — run `themesync pair` first (the list's COMMIT is keyed)", beacon::key_path().display());
+            };
+            let om = Omarchy::from_env()?;
+            let built = themelist::build(&om);
+            for (slug, why) in &built.skipped {
+                eprintln!("[themesync] skipping {slug}: {why}");
+            }
+            if built.slugs.is_empty() {
+                bail!("no Omarchy themes found");
+            }
+            eprintln!("[themesync] list: {} themes, {} bytes, crc {:#06x}", built.slugs.len(), built.bytes.len(), built.crc());
+            let attempts = retries.max(1);
+            for attempt in 1..=attempts {
+                let (_adapter, peripheral) = find_watch(&ble.options(), attempts).await?;
+                let result = ble::push_list(&peripheral, &built.bytes, &key, force, frame, |m| eprintln!("[themesync] {m}")).await;
+                let _ = btleplug::api::Peripheral::disconnect(&peripheral).await;
+                match result {
+                    Ok(outcome) => {
+                        println!("{} themes ({} bytes, crc {:#06x}): {outcome}", built.slugs.len(), built.bytes.len(), built.crc());
+                        break;
+                    }
+                    Err(e) if attempt < attempts && !format!("{e:#}").contains("ATT error") => {
+                        eprintln!("[themesync] attempt {attempt}: {e:#}; retrying");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }

@@ -23,6 +23,12 @@ pub enum Request {
     Ping,
     /// `themesync pair`: hold this key as pending until a watch request verifies with it.
     PairPending { key_hex: String },
+    /// `themesync push-list`: send the theme list over GATT (protocol/BEACON.md §3);
+    /// `force` sends it even when the watch reports the same crc.
+    PushList {
+        #[serde(default)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -96,6 +102,8 @@ mod tests {
             serde_json::to_string(&Request::Push { packet_hex: "5448".into() }).unwrap(),
             r#"{"cmd":"push","packet_hex":"5448"}"#
         );
+        assert_eq!(serde_json::to_string(&Request::PushList { force: true }).unwrap(), r#"{"cmd":"push_list","force":true}"#);
+        assert_eq!(serde_json::from_str::<Request>(r#"{"cmd":"push_list"}"#).unwrap(), Request::PushList { force: false });
         let r: Reply = serde_json::from_str(r#"{"ok":true,"message":"sent","connected":true}"#).unwrap();
         assert!(r.ok && r.connected == Some(true));
     }

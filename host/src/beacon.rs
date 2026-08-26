@@ -68,6 +68,8 @@ pub enum Op {
     /// variants, so it only jumped to an unrelated theme. The opcode stays reserved.
     Set,
     Resend,
+    /// "Push me the theme list over GATT" (protocol/BEACON.md §3); arg 0.
+    List,
 }
 
 impl Op {
@@ -77,6 +79,7 @@ impl Op {
             Op::Prev => 2,
             Op::Set => 4,
             Op::Resend => 5,
+            Op::List => 6,
         }
     }
     pub fn from_code(c: u8) -> Option<Op> {
@@ -85,6 +88,7 @@ impl Op {
             2 => Op::Prev,
             4 => Op::Set,
             5 => Op::Resend,
+            6 => Op::List,
             _ => return None,
         })
     }
@@ -118,7 +122,8 @@ impl std::fmt::Display for RequestError {
     }
 }
 
-fn mac4(key: &[u8], data: &[u8]) -> [u8; 4] {
+/// First 4 bytes of HMAC-SHA256(key, data): the request MAC, and the theme list's COMMIT MAC.
+pub fn mac4(key: &[u8], data: &[u8]) -> [u8; 4] {
     let mut m = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     m.update(data);
     let out = m.finalize().into_bytes();
@@ -319,5 +324,10 @@ mod tests {
         let set = encode_request(&key, Request { nonce: 0x3C, op: Op::Set, arg: slug_id("tokyo-night") });
         assert_eq!(slug_id("tokyo-night"), 0xAAE5);
         assert_eq!(set.to_vec(), vec![0x54, 0x02, 0x3c, 0x04, 0xe5, 0xaa, 0x68, 0x05, 0xb1, 0xb4]);
+        let list = encode_request(&key, Request { nonce: 0x11, op: Op::List, arg: 0 });
+        assert_eq!(&list[..6], &[0x54, 0x02, 0x11, 0x06, 0x00, 0x00]);
+        assert_eq!(decode_request(&key, &list).unwrap().op, Op::List);
+        assert_eq!(Op::from_code(6), Some(Op::List));
+        assert_eq!(Op::from_code(3), None);
     }
 }

@@ -270,9 +270,10 @@ pub async fn connect_with_retry(adapter: &Adapter, opts: &BleOptions, attempts: 
 pub const MINI_SERVICE_UUID: Uuid = uuid!("7a0e0001-0f0e-4d0c-9c0b-0a0908070605");
 pub const MINI_CHR_COLORS: Uuid = uuid!("7a0e0002-0f0e-4d0c-9c0b-0a0908070605");
 pub const MINI_CHR_NAME: Uuid = uuid!("7a0e0003-0f0e-4d0c-9c0b-0a0908070605");
-/// Proposed (protocol/BEACON.md): write-only pairing key for beacon requests. Id not yet
-/// confirmed by the firmware side.
+/// Pairing key for beacon requests (protocol/BEACON.md §2b): write-only `[0x01][code][key]`.
 pub const MINI_CHR_KEY: Uuid = uuid!("7a0e0005-0f0e-4d0c-9c0b-0a0908070605");
+/// The theme list (protocol/BEACON.md §3): read = 6-byte status, write = BEGIN/DATA/COMMIT frames.
+pub const MINI_CHR_LIST: Uuid = uuid!("7a0e0006-0f0e-4d0c-9c0b-0a0908070605");
 
 /// Connect, write a `colors` packet (13-byte legacy or the firmware's v2 TLV), optionally the
 /// legacy `name` characteristic, and read `colors` back. Returns the read-back bytes as-is:
@@ -304,4 +305,119 @@ pub async fn write_characteristic(peripheral: &Peripheral, uuid: Uuid, value: &[
     let chr = peripheral.characteristics().into_iter().find(|c| c.uuid == uuid).ok_or_else(|| anyhow!("the watch has no characteristic {uuid} (firmware without it?)"))?;
     peripheral.write(&chr, value, WriteType::WithResponse).await.with_context(|| format!("writing {uuid}"))?;
     Ok(())
+}
+
+/// Find a peripheral by Bluetooth address (`AA:BB:CC:DD:EE:FF`, any case): the daemon knows
+/// the watch's address from the request it just scanned. BlueZ only; CoreBluetooth hides
+/// addresses, so there this never matches and callers fall back to [`discover_service`].
+pub async fn discover_by_address(adapter: &Adapter, addr: &str, timeout: Duration) -> Result<Peripheral> {
+    let want = addr.to_ascii_uppercase();
+    adapter.start_scan(ScanFilter::default()).await.context("starting BLE scan (is Bluetooth powered on?)")?;
+    let deadline = Instant::now() + timeout;
+    let result = loop {
+        let hit = adapter.peripherals().await.unwrap_or_default().into_iter().find(|p| p.address().to_string().to_ascii_uppercase() == want);
+        if let Some(p) = hit {
+            break Ok(p);
+        }
+        if Instant::now() >= deadline {
+            break Err(anyhow!("{addr} not seen within {timeout:?}"));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let _ = adapter.stop_scan().await;
+    result
+}
+
+/// The watch at `addr` if it is known, else any watch advertising the theme service.
+pub async fn find_watch(adapter: &Adapter, opts: &BleOptions, addr: Option<&str>) -> Result<Peripheral> {
+    if let Some(a) = addr {
+        if let Ok(p) = discover_by_address(adapter, a, opts.scan_timeout).await {
+            return Ok(p);
+        }
+    }
+    discover_service(adapter, opts, MINI_SERVICE_UUID).await
+}
+
+/// How a list push ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListPush {
+    /// The watch already held this list (same crc and count): nothing was written.
+    Skipped(crate::themelist::ListStatus),
+    Pushed { frames: usize, frame_len: usize, status: Option<crate::themelist::ListStatus> },
+}
+
+impl std::fmt::Display for ListPush {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListPush::Skipped(s) => write!(f, "watch already holds it ({s})"),
+            ListPush::Pushed { frames, frame_len, status: Some(s) } => write!(f, "pushed in {frames} writes of <= {frame_len} B; watch reports {s}"),
+            ListPush::Pushed { frames, frame_len, status: None } => write!(f, "pushed in {frames} writes of <= {frame_len} B (status not readable)"),
+        }
+    }
+}
+
+/// Add the watch's meaning of an ATT application error (0x80..0x84) to a write failure.
+fn with_att_hint(e: anyhow::Error) -> anyhow::Error {
+    let text = format!("{e:#}");
+    let lower = text.to_ascii_lowercase();
+    for code in crate::themelist::ATT_ERROR_FIRST..=crate::themelist::ATT_ERROR_LAST {
+        if lower.contains(&format!("0x{code:02x}")) || lower.contains(&format!("error {code}")) {
+            if let Some(m) = crate::themelist::att_error_meaning(code) {
+                return e.context(format!("watch answered ATT error {code:#04x}: {m}"));
+            }
+        }
+    }
+    e
+}
+
+/// Push the theme list (protocol/BEACON.md §3): read the status, skip when the watch already
+/// holds the same bytes (unless `force`), else BEGIN / DATA… / COMMIT, one write-with-response
+/// each, DATA frames sized to the negotiated MTU (`frame` overrides), then read the status
+/// back to confirm the commit. The peripheral is left connected; the caller disconnects.
+pub async fn push_list(peripheral: &Peripheral, list: &[u8], key: &[u8], force: bool, frame: Option<usize>, log: impl Fn(&str)) -> Result<ListPush> {
+    use crate::themelist::{self, ListStatus};
+    if !peripheral.is_connected().await.unwrap_or(false) {
+        peripheral.connect().await.context("connecting to the watch")?;
+    }
+    peripheral.discover_services().await.context("discovering GATT services")?;
+    let chr = peripheral
+        .characteristics()
+        .into_iter()
+        .find(|c| c.uuid == MINI_CHR_LIST)
+        .ok_or_else(|| anyhow!("the watch has no list characteristic {MINI_CHR_LIST} (firmware without the theme list?)"))?;
+    let status = match peripheral.read(&chr).await {
+        Ok(b) => match ListStatus::decode(&b) {
+            Ok(s) => Some(s),
+            Err(e) => { log(&format!("list status unreadable ({e}); pushing anyway")); None }
+        },
+        Err(e) => { log(&format!("list status read failed ({e}); pushing anyway")); None }
+    };
+    if let Some(s) = status {
+        log(&format!("watch list status: {s}"));
+        if !force && s.holds(list) {
+            return Ok(ListPush::Skipped(s));
+        }
+    }
+    let mtu = peripheral.mtu();
+    let frame_len = frame.map(|f| f.clamp(themelist::MIN_FRAME, themelist::MAX_FRAME)).unwrap_or_else(|| themelist::frame_len_for_mtu(mtu));
+    let frames = themelist::frames(list, key, frame_len);
+    log(&format!("mtu {mtu}: {} bytes in {} writes of <= {frame_len} B", list.len(), frames.len()));
+    for f in &frames {
+        peripheral
+            .write(&chr, f, WriteType::WithResponse)
+            .await
+            .map_err(anyhow::Error::from)
+            .map_err(with_att_hint)
+            .with_context(|| format!("writing {}", themelist::describe_frame(f)))?;
+    }
+    let status = match peripheral.read(&chr).await {
+        Ok(b) => ListStatus::decode(&b).ok(),
+        Err(_) => None,
+    };
+    if let Some(s) = status {
+        if !s.holds(list) {
+            bail!("COMMIT accepted but the watch now reports {s}, expected {} themes with crc {:#06x}", list.get(1).copied().unwrap_or(0), crate::protocol::crc16(list));
+        }
+    }
+    Ok(ListPush::Pushed { frames: frames.len(), frame_len, status })
 }

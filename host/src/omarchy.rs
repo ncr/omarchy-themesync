@@ -29,25 +29,34 @@ pub struct Omarchy {
     /// `~/.local/state/omarchy/current` (v4) — falls back to `~/.config/omarchy/current` (v3).
     pub current_dir: PathBuf,
     pub user_themes: PathBuf,
-    /// `$OMARCHY_PATH/themes`, default `/usr/share/omarchy/themes` (v4).
+    /// `$OMARCHY_PATH/themes`; without the variable (a systemd user service does not get the
+    /// shell's exports) `~/.local/share/omarchy/themes` when that exists, else
+    /// `/usr/share/omarchy/themes`.
     pub system_themes: PathBuf,
 }
 
 impl Omarchy {
     pub fn from_env() -> Result<Omarchy> {
         let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?;
+        let omarchy_path = std::env::var_os("OMARCHY_PATH").map(PathBuf::from);
+        Ok(Omarchy::at(home, omarchy_path))
+    }
+
+    /// The layout under `home`, with `omarchy_path` = `$OMARCHY_PATH` if set.
+    pub fn at(home: PathBuf, omarchy_path: Option<PathBuf>) -> Omarchy {
         let v4 = home.join(".local/state/omarchy/current");
         let v3 = home.join(".config/omarchy/current");
         let current_dir = if v4.exists() || !v3.exists() { v4 } else { v3 };
-        let omarchy_path = std::env::var_os("OMARCHY_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/usr/share/omarchy"));
-        Ok(Omarchy {
+        let omarchy_path = omarchy_path.unwrap_or_else(|| {
+            let local = home.join(".local/share/omarchy");
+            if local.join("themes").is_dir() { local } else { PathBuf::from("/usr/share/omarchy") }
+        });
+        Omarchy {
             user_themes: home.join(".config/omarchy/themes"),
             system_themes: omarchy_path.join("themes"),
             current_dir,
             home,
-        })
+        }
     }
 
     pub fn colors_file(&self) -> PathBuf {
@@ -540,6 +549,18 @@ color15 = "#ffffff"
         raw.insert("foreground".to_string(), "#ffffff".to_string());
         assert_eq!(resolve(raw, Some(&dir)).mode, Some(Mode::Light)); // marker file
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn system_themes_follow_omarchy_path_then_the_local_install() {
+        let home = std::env::temp_dir().join(format!("themesync-home-{}", std::process::id()));
+        fs::create_dir_all(home.join(".local/share/omarchy/themes/nord")).unwrap();
+        assert_eq!(Omarchy::at(home.clone(), Some(PathBuf::from("/opt/omarchy"))).system_themes, PathBuf::from("/opt/omarchy/themes"));
+        assert_eq!(Omarchy::at(home.clone(), None).system_themes, home.join(".local/share/omarchy/themes"));
+        assert_eq!(Omarchy::at(home.clone(), None).list_themes(), vec!["nord".to_string()]);
+        fs::remove_dir_all(&home).unwrap();
+        assert_eq!(Omarchy::at(home.clone(), None).system_themes, PathBuf::from("/usr/share/omarchy/themes"));
+        assert_eq!(Omarchy::at(home.clone(), None).user_themes, home.join(".config/omarchy/themes"));
     }
 
     #[test]

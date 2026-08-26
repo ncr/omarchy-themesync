@@ -2,26 +2,30 @@
 //!
 //! * Advertises the current Omarchy theme as the state beacon, forever (30 ms "burst" for
 //!   10 s after a change, then 100 ms).
-//! * Scans passively for the watch's requests (NEXT/PREV/TOGGLE/SET/RESEND), checks their
+//! * Scans passively for the watch's requests (NEXT/PREV/SET/RESEND/LIST), checks their
 //!   MAC against the pairing key, and drives `omarchy-theme-set` — which fires the hook, which
 //!   comes back through the socket, which bumps the beacon. One loop for both directions.
+//! * Pushes the theme list over GATT (`protocol/BEACON.md` §3) when a pairing completes, when
+//!   the watch asks (LIST), and on `themesync push-list`.
 //! * Serves the socket the hook and `themesync sync` talk to.
 //! * Until the watch firmware receives beacons, also pushes each change over a one-shot
 //!   GATT connection (`--no-gatt` turns that off).
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bluer::Address;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use crate::beacon::{self, Op, Request as BeaconRequest, Verified};
 use crate::omarchy::Omarchy;
 use crate::palette::map_source;
 use crate::protocol;
+use crate::themelist;
 use crate::transport::adv::Radio;
 use crate::transport::ble::{self, BleOptions};
 use crate::transport::ipc::{socket_path, Reply, Request};
@@ -91,7 +95,8 @@ async fn serve_socket(tx: mpsc::Sender<Ipc>) -> Result<()> {
                     if tx.send(Ipc { req, reply: otx }).await.is_err() {
                         Reply::err("daemon shutting down")
                     } else {
-                        tokio::time::timeout(Duration::from_secs(20), orx)
+                        // A list push (scan + connect + a few writes, with retries) can take a while.
+                        tokio::time::timeout(Duration::from_secs(90), orx)
                             .await
                             .ok()
                             .and_then(Result::ok)
@@ -114,7 +119,7 @@ fn act(om: &Omarchy, req: BeaconRequest) -> Result<Option<String>> {
         Op::Next => om.neighbour_theme(1),
         Op::Prev => om.neighbour_theme(-1),
         Op::Set => om.list_themes().into_iter().find(|s| beacon::slug_id(s) == req.arg),
-        Op::Resend => return Ok(None),
+        Op::Resend | Op::List => return Ok(None), // handled in the loop, no theme change
     };
     let Some(name) = target else {
         log(&format!("{:?} (arg {:#06x}): no matching theme", req.op, req.arg));
@@ -151,6 +156,86 @@ fn gatt_push(opts: BleOptions, wire: Vec<u8>) {
         .await;
         if let Err(e) = r {
             log(&format!("gatt push failed: {e:#}"));
+        }
+    });
+}
+
+/// Everything a theme-list push needs, so the detached task owns its data.
+struct ListPushJob {
+    opts: BleOptions,
+    key: [u8; beacon::KEY_LEN],
+    /// The watch's address from the request just scanned; `None` = any watch with the service.
+    addr: Option<String>,
+    force: bool,
+    reason: &'static str,
+}
+
+/// Build the theme list and push it over GATT (protocol/BEACON.md §3), detached. One push at
+/// a time (`gate`): a trigger while one is in flight is dropped, not queued — the transfer is
+/// idempotent and the next trigger sends the current list anyway. `state` is what `status`
+/// shows; `done` gets the outcome when `push-list` is waiting on the socket.
+fn list_push(job: ListPushJob, gate: Arc<Semaphore>, state: Arc<Mutex<String>>, done: Option<oneshot::Sender<Reply>>) {
+    let Ok(permit) = gate.try_acquire_owned() else {
+        log(&format!("list push ({}): another push is in progress; skipped", job.reason));
+        if let Some(d) = done {
+            let _ = d.send(Reply::err("a list push is already in progress"));
+        }
+        return;
+    };
+    tokio::spawn(async move {
+        let _permit = permit;
+        let r: Result<String> = async {
+            let built = tokio::task::spawn_blocking(|| Omarchy::from_env().map(|om| themelist::build(&om))).await??;
+            for (slug, why) in &built.skipped {
+                log(&format!("list: skipping {slug}: {why}"));
+            }
+            if built.slugs.is_empty() {
+                anyhow::bail!("no Omarchy themes found");
+            }
+            let summary = format!("{} themes, {} B, crc {:#06x}", built.slugs.len(), built.bytes.len(), built.crc());
+            log(&format!("list ({}): {summary}{}", job.reason, job.addr.as_ref().map(|a| format!("; watch {a}")).unwrap_or_default()));
+            let adapter = ble::adapter().await?;
+            let mut delay = Duration::from_millis(500);
+            let mut last = None;
+            for attempt in 1..=3 {
+                let step = async {
+                    let p = ble::find_watch(&adapter, &job.opts, job.addr.as_deref()).await?;
+                    let r = ble::push_list(&p, &built.bytes, &job.key, job.force, None, |m| log(&format!("list: {m}"))).await;
+                    let _ = btleplug::api::Peripheral::disconnect(&p).await;
+                    r
+                };
+                match step.await {
+                    Ok(outcome) => return Ok(format!("{summary}: {outcome}")),
+                    Err(e) => {
+                        let text = format!("{e:#}");
+                        log(&format!("list push attempt {attempt}: {text}"));
+                        let watch_said_no = text.contains("ATT error"); // a rejected frame will not pass on retry
+                        last = Some(e);
+                        if watch_said_no {
+                            break;
+                        }
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                    }
+                }
+            }
+            Err(last.expect("at least one attempt ran"))
+        }
+        .await;
+        let (reply, text) = match r {
+            Ok(s) => {
+                log(&format!("list push ({}): {s}", job.reason));
+                (Reply { watch: job.addr.clone(), ..Reply::ok(s.clone()) }, s)
+            }
+            Err(e) => {
+                let s = format!("{e:#}");
+                log(&format!("list push ({}) failed: {s}", job.reason));
+                (Reply::err(s.clone()), format!("failed: {s}"))
+            }
+        };
+        *state.lock().unwrap() = format!("{text} [{}]", job.reason);
+        if let Some(d) = done {
+            let _ = d.send(reply);
         }
     });
 }
@@ -219,6 +304,11 @@ pub async fn run(opts: Options) -> Result<()> {
         log(&format!("pairing: pending key restored from {}", beacon::pending_key_path().display()));
     }
     let mut pair_state = String::from(if pending.is_some() { "pairing pending" } else if key.is_some() { "paired" } else { "no key" });
+    // The theme list push (protocol/BEACON.md §3): the watch's address from its last verified
+    // request, the one-at-a-time gate, and the last outcome for `status`.
+    let mut watch_addr: Option<String> = None;
+    let list_gate = Arc::new(Semaphore::new(1));
+    let list_state = Arc::new(Mutex::new(String::from("never")));
 
     async fn publish(radio: &mut Radio, seq: u8, host: u8, wire: &[u8], burst: bool) {
         if wire.is_empty() {
@@ -253,14 +343,22 @@ pub async fn run(opts: Options) -> Result<()> {
                 }
             }
             Some(ipc) = rx.recv() => {
+                if let Request::PushList { force } = ipc.req {
+                    match key {
+                        Some(k) => list_push(ListPushJob { opts: opts.ble.clone(), key: k, addr: watch_addr.clone(), force, reason: "push-list" }, list_gate.clone(), list_state.clone(), Some(ipc.reply)),
+                        None => { let _ = ipc.reply.send(Reply::err("no pairing key: run `themesync pair` first (the list's COMMIT is keyed)")); }
+                    }
+                    continue;
+                }
                 let reply = match ipc.req {
                     Request::Ping => Reply { connected: Some(true), watch: Some("beacon".into()), ..Reply::ok("pong") },
                     Request::Status => Reply {
                         theme: Some(theme_name.clone()),
                         connected: Some(true),
-                        watch: Some(format!("beacon seq {seq}, host {host:#04x}, key {}, last request {}", if key.is_some() { "loaded" } else { "missing" }, last_request.as_deref().unwrap_or("none"))),
+                        watch: Some(format!("beacon seq {seq}, host {host:#04x}, key {}, last request {}, list push {}", if key.is_some() { "loaded" } else { "missing" }, last_request.as_deref().unwrap_or("none"), list_state.lock().unwrap())),
                         ..Reply::ok(pair_state.clone())
                     },
+                    Request::PushList { .. } => unreachable!("handled above"),
                     Request::PairPending { key_hex } => match protocol::from_hex(&key_hex).and_then(|v| <[u8; beacon::KEY_LEN]>::try_from(v).ok()) {
                         Some(k) => {
                             pending = Some(k);
@@ -329,6 +427,9 @@ pub async fn run(opts: Options) -> Result<()> {
                         last_request = Some(format!("{:?} (nonce {:#04x}) from {addr} [pairing confirmation]", req.op, req.nonce));
                         publish(&mut radio, seq, host, &theme_wire, true).await;
                         burst_until = Some(Instant::now() + BURST_FOR);
+                        // "The list arrives with pairing": push it now, over a connection to that watch.
+                        watch_addr = Some(addr.to_string());
+                        list_push(ListPushJob { opts: opts.ble.clone(), key: k, addr: watch_addr.clone(), force: false, reason: "pairing" }, list_gate.clone(), list_state.clone(), None);
                     }
                     Ok((req, Verified::Active)) => {
                         let a = addr.to_string();
@@ -337,11 +438,19 @@ pub async fn run(opts: Options) -> Result<()> {
                             continue; // the same press: still on the air, or BlueZ's cache of it
                         }
                         seen.insert(a.clone(), k);
+                        watch_addr = Some(a.clone());
                         last_request = Some(format!("{:?} (nonce {:#04x}) from {a}", req.op, req.nonce));
                         log(&format!("{a}: {:?} nonce {:#04x}", req.op, req.nonce));
                         if req.op == Op::Resend {
                             publish(&mut radio, seq, host, &theme_wire, true).await;
                             burst_until = Some(Instant::now() + BURST_FOR);
+                            continue;
+                        }
+                        if req.op == Op::List {
+                            // The watch asked for a refresh: always send (its request stays on the
+                            // air until our COMMIT lands), signed with the key that verified it.
+                            let key = key.expect("Verified::Active implies an active key");
+                            list_push(ListPushJob { opts: opts.ble.clone(), key, addr: watch_addr.clone(), force: true, reason: "request" }, list_gate.clone(), list_state.clone(), None);
                             continue;
                         }
                         if let Some(om) = &om {
