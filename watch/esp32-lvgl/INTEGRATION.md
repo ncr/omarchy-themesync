@@ -71,5 +71,5 @@ cargo run -- sync --file tests/fixtures/catppuccin-latte.toml   # from any machi
 cargo run -- status                    # info v1..v1, 14 slots; status Ok, crc, mode
 ```
 
-On the Omarchy box: `omawatch install-hook`, optionally `systemctl --user enable --now omawatch`
+On the Omarchy box: `themesync install-hook`, optionally `systemctl --user enable --now themesync`
 (daemon: persistent link + PREV/MODE/NEXT from the watch), then `omarchy theme set Gruvbox`.

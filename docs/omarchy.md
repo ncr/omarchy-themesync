@@ -14,7 +14,7 @@ file cited below. Also cross-checked with a local shallow clone.
 | Hooks in `~/.config/omarchy/hooks/theme-set.d/` | **Correct** (since v3.8.0; hooks since v3.1.0). A flat `~/.config/omarchy/hooks/theme-set` runs first. |
 | Current theme at `~/.config/omarchy/current/theme` | **Wrong for v4.** It is `~/.local/state/omarchy/current/theme/` — a real directory, atomically `mv`'d in — with the slug in `~/.local/state/omarchy/current/theme.name`. v3 used `~/.config/omarchy/current`. |
 | Stock themes under `~/.local/share/omarchy/themes` | **Wrong for v4.** `$OMARCHY_PATH/themes` = `/usr/share/omarchy/themes`; `~/.config/omarchy/themes/<slug>` holds user/installed themes and overlays the stock one. |
-| `omarchy-theme-next` | Does not exist. Only `omarchy-theme-bg-next`, `omarchy-theme-switcher`, `omarchy-theme-refresh`. `omawatch next/prev` enumerate the theme dirs the way `omarchy-theme-list` does. |
+| `omarchy-theme-next` | Does not exist. Only `omarchy-theme-bg-next`, `omarchy-theme-switcher`, `omarchy-theme-refresh`. `themesync next/prev` enumerate the theme dirs the way `omarchy-theme-list` does. |
 
 ## The resolver (`bin/omarchy-theme-color`)
 
@@ -31,7 +31,7 @@ value = text between the first pair of quotes; keys `[A-Za-z0-9_-]+`, values res
 short names from the canonical ones. Mode: `mode` key → legacy `theme_type` → a `light.mode`
 file → `r+g+b > 382` of `background` → dark. `host/src/omarchy.rs::resolve` is a port of this
 cascade (used when the script is not on PATH, i.e. tests and non-Omarchy machines) and
-`omawatch` prefers the real script when present.
+`themesync` prefers the real script when present.
 
 Legacy themes without `colors.toml`: `omarchy-theme-set` generates one from
 `alacritty.toml` via `omarchy-theme-colors-from-alacritty` (`accent=color4`, `selection`,
@@ -55,7 +55,7 @@ is staged. All 22 stock themes ship `colors.toml`; none has `light.mode` anymore
 6. `omarchy-theme-switcher --preload`, `omarchy-theme-bg-cache &`.
 
 So a hook sees the *fully* applied theme (directory, name, every app retinted) and must
-return quickly — hence `omawatch sync --async`.
+return quickly — hence `themesync sync --async`.
 
 ## What Omarchy recommends for third parties
 

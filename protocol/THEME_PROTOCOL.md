@@ -29,7 +29,7 @@ Slot numbers are the wire order. The list is **append-only**; never renumber.
 | 12   | `success`        | ok, charging, connected                                |
 | 13   | `info`           | informational (kept distinct from `accent`)            |
 
-Human-readable form (what `omawatch theme --json` prints, and what a future JSON transport
+Human-readable form (what `themesync theme --json` prints, and what a future JSON transport
 would carry verbatim):
 
 ```json

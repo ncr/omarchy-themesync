@@ -1,12 +1,12 @@
 [package]
-name = "omawatch"
+name = "omarchy-themesync"
 version = "0.1.0"
 edition = "2021"
-description = "Sync the active Omarchy desktop theme to a smartwatch over BLE (Theme Protocol v1)"
+description = "Push the active Omarchy desktop theme to external devices (Theme Protocol v1; smartwatch over BLE first)"
 license = "MIT"
 
 [[bin]]
-name = "omawatch"
+name = "themesync"
 path = "src/main.rs"
 
 [dependencies]
@@ -18,6 +18,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net",
 btleplug = "0.12"
 futures = "0.3"
 uuid = "1"
+bluer = { version = "0.17.4", features = ["bluetoothd"] }
+hmac = "0.13.0"
+sha2 = "0.11.0"
 
 [profile.release]
 strip = true

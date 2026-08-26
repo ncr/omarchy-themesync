@@ -21,6 +21,8 @@ pub enum Request {
     Push { packet_hex: String },
     Status,
     Ping,
+    /// `themesync pair`: hold this key as pending until a watch request verifies with it.
+    PairPending { key_hex: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -45,19 +47,19 @@ impl Reply {
     }
 }
 
-/// `$OMAWATCH_SOCKET`, else `$XDG_RUNTIME_DIR/omawatch.sock`, else `/tmp/omawatch-<uid>.sock`.
+/// `$THEMESYNC_SOCKET`, else `$XDG_RUNTIME_DIR/themesync.sock`, else `/tmp/themesync-<uid>.sock`.
 pub fn socket_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("OMAWATCH_SOCKET") {
+    if let Some(p) = std::env::var_os("THEMESYNC_SOCKET") {
         return PathBuf::from(p);
     }
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join("omawatch.sock");
+        return PathBuf::from(dir).join("themesync.sock");
     }
     let uid = std::env::var("UID").ok().unwrap_or_else(|| {
         // no libc dep: fall back to the login name, which is unique enough for a socket
         std::env::var("USER").unwrap_or_else(|_| "user".into())
     });
-    std::env::temp_dir().join(format!("omawatch-{uid}.sock"))
+    std::env::temp_dir().join(format!("themesync-{uid}.sock"))
 }
 
 /// Send one request to a running daemon. `Ok(None)` when no daemon is listening.

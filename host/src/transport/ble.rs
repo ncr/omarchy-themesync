@@ -39,7 +39,7 @@ pub struct BleOptions {
 
 impl Default for BleOptions {
     fn default() -> Self {
-        BleOptions { name: std::env::var("OMAWATCH_NAME").ok().filter(|s| !s.is_empty()), scan_timeout: Duration::from_secs(8) }
+        BleOptions { name: std::env::var("THEMESYNC_NAME").ok().filter(|s| !s.is_empty()), scan_timeout: Duration::from_secs(8) }
     }
 }
 
@@ -87,14 +87,23 @@ pub async fn discover(adapter: &Adapter, opts: &BleOptions) -> Result<Peripheral
 }
 
 pub async fn discover_service(adapter: &Adapter, opts: &BleOptions, service: Uuid) -> Result<Peripheral> {
+    // Unfiltered scan on purpose: the OW-Watch puts the service UUID in the scan response,
+    // not the advertisement, and a BlueZ UUID filter did not surface it (found only when
+    // BlueZ already had it cached from an earlier `bluetoothctl scan`). Matching happens
+    // below on the collected properties instead.
     adapter
-        .start_scan(ScanFilter { services: vec![service] })
+        .start_scan(ScanFilter::default())
         .await
         .context("starting BLE scan (is Bluetooth powered on?)")?;
     let deadline = Instant::now() + opts.scan_timeout;
     let result = loop {
         let mut found = None;
-        for p in adapter.peripherals().await? {
+        // No `?` inside the loop: every exit must go through `stop_scan()` below, or the
+        // next `start_scan` on BlueZ fails with "Operation already in progress".
+        // A transient D-Bus error here ("Remote peer disconnected" when a device vanishes
+        // mid-listing) is not a reason to give up on the whole scan.
+        let peripherals = adapter.peripherals().await.unwrap_or_default();
+        for p in peripherals {
             let Ok(Some(props)) = p.properties().await else { continue };
             let by_service = props.services.contains(&service);
             let by_name = match (&opts.name, &props.local_name) {
@@ -114,8 +123,8 @@ pub async fn discover_service(adapter: &Adapter, opts: &BleOptions, service: Uui
         }
         if Instant::now() >= deadline {
             break Err(anyhow!(
-                "no watch advertising {} found within {:?}{}",
-                SERVICE_UUID,
+                "no device advertising {} found within {:?}{}",
+                service,
                 opts.scan_timeout,
                 opts.name.as_ref().map(|n| format!(" (name filter: {n:?})")).unwrap_or_default()
             ));
@@ -261,40 +270,38 @@ pub async fn connect_with_retry(adapter: &Adapter, opts: &BleOptions, attempts: 
 pub const MINI_SERVICE_UUID: Uuid = uuid!("7a0e0001-0f0e-4d0c-9c0b-0a0908070605");
 pub const MINI_CHR_COLORS: Uuid = uuid!("7a0e0002-0f0e-4d0c-9c0b-0a0908070605");
 pub const MINI_CHR_NAME: Uuid = uuid!("7a0e0003-0f0e-4d0c-9c0b-0a0908070605");
+/// Proposed (protocol/BEACON.md): write-only pairing key for beacon requests. Id not yet
+/// confirmed by the firmware side.
+pub const MINI_CHR_KEY: Uuid = uuid!("7a0e0005-0f0e-4d0c-9c0b-0a0908070605");
 
-/// Map the watch palette onto the four colours the mini format carries.
-pub fn mini_wire(p: &crate::palette::WatchPalette) -> [u8; 13] {
-    use crate::palette::Role;
-    let mut w = [0u8; 13];
-    w[0] = 1;
-    for (i, role) in [Role::Background, Role::TextPrimary, Role::Accent, Role::Danger].iter().enumerate() {
-        let c = p.get(*role);
-        w[1 + 3 * i] = c.r;
-        w[2 + 3 * i] = c.g;
-        w[3 + 3 * i] = c.b;
-    }
-    w
-}
-
-/// Connect, write colours + name, read the colours back. Returns the read-back bytes.
-pub async fn send_mini(peripheral: &Peripheral, wire: &[u8; 13], name: &str) -> Result<[u8; 13]> {
+/// Connect, write a `colors` packet (13-byte legacy or the firmware's v2 TLV), optionally the
+/// legacy `name` characteristic, and read `colors` back. Returns the read-back bytes as-is:
+/// the current firmware answers with the palette it applied, in its v2 format.
+pub async fn send_colors(peripheral: &Peripheral, wire: &[u8], name: Option<&str>) -> Result<Vec<u8>> {
     if !peripheral.is_connected().await.unwrap_or(false) {
         peripheral.connect().await.context("connecting to the watch")?;
     }
     peripheral.discover_services().await.context("discovering GATT services")?;
     let chars = peripheral.characteristics();
-    let colors = chars.iter().find(|c| c.uuid == MINI_CHR_COLORS).cloned().ok_or_else(|| anyhow!("no mini colors characteristic"))?;
-    let name_chr = chars.iter().find(|c| c.uuid == MINI_CHR_NAME).cloned();
-    peripheral.write(&colors, wire, WriteType::WithResponse).await.context("writing mini colors")?;
-    if let Some(nc) = name_chr {
-        let n: String = name.chars().take_while({ let mut len = 0; move |c| { len += c.len_utf8(); len <= 31 } }).collect();
-        peripheral.write(&nc, n.as_bytes(), WriteType::WithResponse).await.context("writing mini name")?;
+    let colors = chars.iter().find(|c| c.uuid == MINI_CHR_COLORS).cloned().ok_or_else(|| anyhow!("no colors characteristic {MINI_CHR_COLORS}"))?;
+    peripheral.write(&colors, wire, WriteType::WithResponse).await.context("writing colors")?;
+    if let Some(name) = name {
+        if let Some(nc) = chars.iter().find(|c| c.uuid == MINI_CHR_NAME).cloned() {
+            let n: String = name.chars().take_while({ let mut len = 0; move |c| { len += c.len_utf8(); len <= 31 } }).collect();
+            peripheral.write(&nc, n.as_bytes(), WriteType::WithResponse).await.context("writing name")?;
+        }
     }
-    let back = peripheral.read(&colors).await.context("reading mini colors back")?;
-    let mut out = [0u8; 13];
-    if back.len() != 13 {
-        bail!("read back {} bytes, expected 13", back.len());
+    let back = peripheral.read(&colors).await.context("reading colors back")?;
+    Ok(back)
+}
+
+/// Write one arbitrary characteristic on the watch's theme service (used for the pairing key).
+pub async fn write_characteristic(peripheral: &Peripheral, uuid: Uuid, value: &[u8]) -> Result<()> {
+    if !peripheral.is_connected().await.unwrap_or(false) {
+        peripheral.connect().await.context("connecting to the watch")?;
     }
-    out.copy_from_slice(&back);
-    Ok(out)
+    peripheral.discover_services().await.context("discovering GATT services")?;
+    let chr = peripheral.characteristics().into_iter().find(|c| c.uuid == uuid).ok_or_else(|| anyhow!("the watch has no characteristic {uuid} (firmware without it?)"))?;
+    peripheral.write(&chr, value, WriteType::WithResponse).await.with_context(|| format!("writing {uuid}"))?;
+    Ok(())
 }

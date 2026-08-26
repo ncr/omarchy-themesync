@@ -113,34 +113,29 @@ impl Omarchy {
         }
     }
 
-    /// The mode a theme *would* have, without activating it (for "toggle light/dark").
-    pub fn theme_mode(&self, slug: &str) -> Option<Mode> {
-        let file = self.theme_dir(slug).join("colors.toml");
-        load_file(&file).ok().and_then(|p| p.mode())
-    }
-
     /// Pick the theme `steps` positions away from the current one (wrapping).
     pub fn neighbour_theme(&self, steps: i32) -> Option<String> {
+        self.neighbour_of(self.current_theme_name().as_deref(), steps)
+    }
+
+    /// Same, relative to an explicit slug (`None` = the first theme).
+    pub fn neighbour_of(&self, slug: Option<&str>, steps: i32) -> Option<String> {
         let themes = self.list_themes();
         if themes.is_empty() {
             return None;
         }
-        let cur = self.current_theme_name();
-        let idx = cur.as_ref().and_then(|c| themes.iter().position(|t| t == c)).unwrap_or(0) as i32;
+        let idx = slug.and_then(|c| themes.iter().position(|t| t == c)).unwrap_or(0) as i32;
         let n = themes.len() as i32;
         Some(themes[(((idx + steps) % n) + n) as usize % themes.len()].clone())
     }
 
-    /// The next theme (in list order) whose mode differs from the current one.
-    pub fn opposite_mode_theme(&self) -> Option<String> {
-        let themes = self.list_themes();
-        let cur = self.current_theme_name()?;
-        let cur_mode = self.theme_mode(&cur).unwrap_or(Mode::Dark);
-        let start = themes.iter().position(|t| *t == cur).unwrap_or(0);
-        (1..themes.len())
-            .map(|i| &themes[(start + i) % themes.len()])
-            .find(|t| self.theme_mode(t).map(|m| m != cur_mode).unwrap_or(false))
-            .cloned()
+    /// Resolve an installed theme by slug without activating it.
+    pub fn load_theme(&self, slug: &str) -> Result<SourcePalette> {
+        let mut p = load_file(&self.theme_dir(slug).join("colors.toml"))?;
+        if p.name.is_none() {
+            p.name = Some(slug.to_string());
+        }
+        Ok(p)
     }
 
     /// Apply a theme through Omarchy itself, so every app retints and the hooks fire.
@@ -171,7 +166,7 @@ pub fn load_file(path: &Path) -> Result<SourcePalette> {
 }
 
 fn load_via_omarchy_theme_color(path: &Path) -> Result<Option<SourcePalette>> {
-    if std::env::var_os("OMAWATCH_NO_OMARCHY_RESOLVER").is_some() {
+    if std::env::var_os("THEMESYNC_NO_OMARCHY_RESOLVER").is_some() {
         return Ok(None);
     }
     let out = match Command::new("omarchy-theme-color").arg("--file").arg(path).arg("--all").output() {
@@ -537,7 +532,7 @@ color15 = "#ffffff"
         raw.insert("mode".to_string(), "light".to_string());
         assert_eq!(resolve(raw.clone(), None).mode, Some(Mode::Light)); // canonical key wins
 
-        let dir = std::env::temp_dir().join(format!("omawatch-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("themesync-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("light.mode"), "").unwrap();
         let mut raw = BTreeMap::new();

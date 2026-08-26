@@ -44,7 +44,7 @@ cards brighter than the screen, which is the inverse of the theme author's inten
 
 What is deliberately **not** done: no adjustment of the status colours for contrast on
 light surfaces (latte's `warning` #df8e1d reads 2.0:1 on its card). Those colours are used
-for bars and large indicators, and darkening them would change the theme; `omawatch theme
+for bars and large indicators, and darkening them would change the theme; `themesync theme
 --contrast` prints the numbers so a future `--boost-contrast` derivation can be an
 informed choice rather than a silent one.
 
@@ -57,7 +57,7 @@ slot. Adding it later is an append (slot 14) with no compatibility cost.
 ## Checking a theme
 
 ```
-omawatch theme --file host/tests/fixtures/catppuccin-latte.toml --contrast
+themesync theme --file host/tests/fixtures/catppuccin-latte.toml --contrast
 ```
 
 prints the 14 roles with swatches and the WCAG ratios for the pairs the UI depends on

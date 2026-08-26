@@ -333,7 +333,7 @@ impl Info {
     }
 }
 
-/// Render a packet as the annotated hex dump `omawatch encode` prints.
+/// Render a packet as the annotated hex dump `themesync encode` prints.
 pub fn hexdump_annotated(bytes: &[u8]) -> String {
     let mut s = String::new();
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ");
@@ -520,5 +520,285 @@ mod tests {
         assert_eq!(from_hex(&to_hex(&bytes)).unwrap(), bytes);
         assert_eq!(from_hex("54 48\n01"), Some(vec![0x54, 0x48, 1]));
         assert_eq!(from_hex("abc"), None);
+    }
+}
+
+
+// ============================================================================================
+// The OW-Watch firmware's own wire format ("v2 TLV", `main/theme.h` in ~/dev/onewheel/watch)
+// — what the `colors` characteristic 7a0e0002 accepts and what the theme beacon carries.
+// Source of truth is the firmware header; this mirrors it.
+//
+//   [2] then records, any order:
+//     colour  [role id 1..0x3F][R][G][B]
+//     meta    [tag >= 0x40][len][payload]     0x40 name (UTF-8, <= 31 B), 0x41 flags (1 B)
+//   flags: bit0 light, bit1 force_black. Unknown roles/tags are skipped; a receiver needs
+//   background + foreground and derives every role it was not given.
+// ============================================================================================
+
+pub const V2_VERSION: u8 = 2;
+pub const V2_TAG_NAME: u8 = 0x40;
+pub const V2_TAG_FLAGS: u8 = 0x41;
+pub const V2_FLAG_LIGHT: u8 = 0x01;
+pub const V2_FLAG_FORCE_BLACK: u8 = 0x02;
+pub const V2_MAX_NAME: usize = 31;
+/// Beacon-only meta tags (protocol/BEACON.md §1): the themes before/after the current one in
+/// `omarchy-theme-list` order, so the watch can show what NEXT/PREV would switch to.
+/// Payload: `[bg r g b][fg r g b][accent r g b][alarm r g b][name UTF-8, <= V2_NEIGHBOUR_NAME]`.
+/// The theme parser skips them like any unknown tag.
+pub const V2_TAG_PREV: u8 = 0x42;
+pub const V2_TAG_NEXT: u8 = 0x43;
+pub const V2_NEIGHBOUR_NAME: usize = 20;
+
+/// A neighbour theme as carried in the beacon: slug + the four core colours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Neighbour {
+    pub name: String,
+    pub core: [Rgb; 4], // background, foreground, accent, alarm
+}
+
+impl Neighbour {
+    pub fn from_palette(p: &WatchPalette) -> Neighbour {
+        Neighbour { name: p.name.clone(), core: [p.get(Role::Background), p.get(Role::TextPrimary), p.get(Role::Accent), p.get(Role::Danger)] }
+    }
+}
+
+/// Append a `0x42`/`0x43` record to a v2 packet.
+pub fn v2_append_neighbour(packet: &mut Vec<u8>, tag: u8, n: &Neighbour) {
+    let mut name = String::new();
+    for ch in n.name.chars() {
+        if name.len() + ch.len_utf8() > V2_NEIGHBOUR_NAME { break; }
+        name.push(ch);
+    }
+    packet.push(tag);
+    packet.push((12 + name.len()) as u8);
+    for c in n.core {
+        packet.extend_from_slice(&[c.r, c.g, c.b]);
+    }
+    packet.extend_from_slice(name.as_bytes());
+}
+
+/// Firmware role ids (`theme_role_t`), append-only on their side. `cursor` (15) has no
+/// counterpart in [`WatchPalette`]; the watch derives it (= accent) when it is absent.
+pub fn v2_role_id(role: Role) -> u8 {
+    match role {
+        Role::Background => 1,
+        Role::TextPrimary => 2,
+        Role::Accent => 3,
+        Role::Danger => 4,
+        Role::Warning => 5,
+        Role::Success => 6,
+        Role::Info => 7,
+        Role::Surface => 8,
+        Role::SurfaceAlt => 9,
+        Role::TextSecondary => 10,
+        Role::TextDisabled => 11,
+        Role::OnAccent => 12,
+        Role::Selection => 13,
+        Role::Divider => 14,
+    }
+}
+
+#[allow(dead_code)]
+pub fn v2_role_name(id: u8) -> &'static str {
+    match id {
+        1 => "background", 2 => "foreground", 3 => "accent", 4 => "alarm", 5 => "warning",
+        6 => "success", 7 => "info", 8 => "surface", 9 => "surface_alt", 10 => "text_2nd",
+        11 => "text_off", 12 => "on_accent", 13 => "selection", 14 => "divider", 15 => "cursor",
+        _ => "?",
+    }
+}
+
+/// Every role of the palette as a v2 packet (14 records + name + flags, ~80 bytes).
+pub fn encode_v2(p: &WatchPalette, force_black: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 4 * Role::COUNT + 2 + V2_MAX_NAME + 3);
+    out.push(V2_VERSION);
+    for role in Role::ALL {
+        let c = p.get(role);
+        out.extend_from_slice(&[v2_role_id(role), c.r, c.g, c.b]);
+    }
+    let name: Vec<u8> = {
+        let mut n = String::new();
+        for ch in p.name.chars() {
+            if n.len() + ch.len_utf8() > V2_MAX_NAME { break; }
+            n.push(ch);
+        }
+        n.into_bytes()
+    };
+    if !name.is_empty() {
+        out.push(V2_TAG_NAME);
+        out.push(name.len() as u8);
+        out.extend_from_slice(&name);
+    }
+    out.push(V2_TAG_FLAGS);
+    out.push(1);
+    out.push((if p.mode == Mode::Light { V2_FLAG_LIGHT } else { 0 }) | (if force_black { V2_FLAG_FORCE_BLACK } else { 0 }));
+    out
+}
+
+/// The legacy 13-byte packet the same characteristic also accepts: `[1][bg][fg][accent][alarm]`.
+pub fn encode_v1_legacy(p: &WatchPalette) -> [u8; 13] {
+    let mut w = [0u8; 13];
+    w[0] = 1;
+    for (i, role) in [Role::Background, Role::TextPrimary, Role::Accent, Role::Danger].iter().enumerate() {
+        let c = p.get(*role);
+        w[1 + 3 * i] = c.r;
+        w[2 + 3 * i] = c.g;
+        w[3 + 3 * i] = c.b;
+    }
+    w
+}
+
+/// A decoded v2 (or legacy v1) packet, exactly as given on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct V2Packet {
+    pub version: u8,
+    /// role id -> colour, unknown ids included
+    pub colors: std::collections::BTreeMap<u8, Rgb>,
+    pub name: Option<String>,
+    pub light: Option<bool>,
+    pub force_black: bool,
+    pub prev: Option<Neighbour>,
+    pub next: Option<Neighbour>,
+}
+
+impl V2Packet {
+    pub fn get(&self, role: Role) -> Option<Rgb> {
+        self.colors.get(&v2_role_id(role)).copied()
+    }
+    /// The firmware's own rule when no flags record came: luma(background) > 127.
+    pub fn is_light(&self) -> bool {
+        self.light.unwrap_or_else(|| self.colors.get(&1).map(|c| v2_luma(*c) > 127).unwrap_or(false))
+    }
+    pub fn summary(&self) -> String {
+        format!(
+            "{} ({} roles, {}{})",
+            self.name.as_deref().unwrap_or("(unnamed)"),
+            self.colors.len(),
+            if self.is_light() { "light" } else { "dark" },
+            if self.force_black { ", force_black" } else { "" }
+        )
+    }
+}
+
+/// Integer luma the firmware uses (`(299 r + 587 g + 114 b) / 1000`).
+pub fn v2_luma(c: Rgb) -> u32 {
+    (299 * c.r as u32 + 587 * c.g as u32 + 114 * c.b as u32) / 1000
+}
+
+/// Mirrors `parse_wire()` in the firmware: same acceptance rules, same truncation behaviour
+/// (a dangling partial record ends parsing; background + foreground are required).
+pub fn decode_v2(b: &[u8]) -> Result<V2Packet, DecodeError> {
+    let mut out = V2Packet::default();
+    match b.first() {
+        None => return Err(DecodeError::Truncated),
+        Some(1) => {
+            if b.len() < 13 { return Err(DecodeError::Truncated); }
+            out.version = 1;
+            for (i, id) in [1u8, 2, 3, 4].iter().enumerate() {
+                out.colors.insert(*id, Rgb::new(b[1 + 3 * i], b[2 + 3 * i], b[3 + 3 * i]));
+            }
+            return Ok(out);
+        }
+        Some(2) => out.version = 2,
+        Some(v) => return Err(DecodeError::UnsupportedVersion(*v)),
+    }
+    let mut i = 1;
+    while i < b.len() {
+        let tag = b[i];
+        if tag < 0x40 {
+            if i + 4 > b.len() { break; }
+            if tag > 0 { out.colors.insert(tag, Rgb::new(b[i + 1], b[i + 2], b[i + 3])); }
+            i += 4;
+        } else {
+            if i + 2 > b.len() { break; }
+            let n = b[i + 1] as usize;
+            if i + 2 + n > b.len() { break; }
+            let v = &b[i + 2..i + 2 + n];
+            if tag == V2_TAG_NAME {
+                out.name = Some(String::from_utf8_lossy(&v[..v.len().min(V2_MAX_NAME)]).into_owned());
+            } else if tag == V2_TAG_FLAGS && n >= 1 {
+                out.light = Some(v[0] & V2_FLAG_LIGHT != 0);
+                out.force_black = v[0] & V2_FLAG_FORCE_BLACK != 0;
+            } else if (tag == V2_TAG_PREV || tag == V2_TAG_NEXT) && n >= 12 {
+                let core = [0, 3, 6, 9].map(|o| Rgb::new(v[o], v[o + 1], v[o + 2]));
+                let nb = Neighbour { name: String::from_utf8_lossy(&v[12..]).into_owned(), core };
+                if tag == V2_TAG_PREV { out.prev = Some(nb) } else { out.next = Some(nb) }
+            }
+            i += 2 + n;
+        }
+    }
+    if !out.colors.contains_key(&1) || !out.colors.contains_key(&2) {
+        return Err(DecodeError::Truncated);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use crate::palette::Role;
+
+    fn sample() -> WatchPalette {
+        let mut p = WatchPalette { mode: Mode::Light, name: "catppuccin-latte".into(), colors: [Rgb::default(); Role::COUNT] };
+        for (i, r) in Role::ALL.iter().enumerate() {
+            p.set(*r, Rgb::new(i as u8 * 10, 200 - i as u8, 7));
+        }
+        p
+    }
+
+    #[test]
+    fn v2_round_trip_keeps_every_role_name_and_flags() {
+        let p = sample();
+        let bytes = encode_v2(&p, true);
+        assert_eq!(bytes[0], 2);
+        let d = decode_v2(&bytes).unwrap();
+        assert_eq!(d.colors.len(), Role::COUNT);
+        for r in Role::ALL {
+            assert_eq!(d.get(r), Some(p.get(r)), "{}", r.name());
+        }
+        assert_eq!(d.name.as_deref(), Some("catppuccin-latte"));
+        assert_eq!(d.light, Some(true));
+        assert!(d.force_black);
+    }
+
+    #[test]
+    fn v2_neighbour_tags_round_trip_and_are_skipped_by_older_parsers() {
+        let p = sample();
+        let mut bytes = encode_v2(&p, false);
+        let base_len = bytes.len();
+        let mut q = p.clone();
+        q.name = "a-very-long-theme-name-beyond-twenty".into();
+        v2_append_neighbour(&mut bytes, V2_TAG_PREV, &Neighbour::from_palette(&q));
+        v2_append_neighbour(&mut bytes, V2_TAG_NEXT, &Neighbour { name: "nord".into(), core: [Rgb::new(1, 2, 3); 4] });
+        let d = decode_v2(&bytes).unwrap();
+        assert_eq!(d.colors.len(), Role::COUNT, "neighbour records must not touch the palette");
+        assert_eq!(d.prev.as_ref().unwrap().name, "a-very-long-theme-na");
+        assert_eq!(d.prev.as_ref().unwrap().core[2], q.get(Role::Accent));
+        assert_eq!(d.next.as_ref().unwrap().name, "nord");
+        assert_eq!(bytes.len(), base_len + 2 + 12 + 20 + 2 + 12 + 4);
+    }
+
+    #[test]
+    fn v2_legacy_13_bytes_parse_as_core_four() {
+        let p = sample();
+        let w = encode_v1_legacy(&p);
+        let d = decode_v2(&w).unwrap();
+        assert_eq!(d.version, 1);
+        assert_eq!(d.colors.len(), 4);
+        assert_eq!(d.get(Role::Danger), Some(p.get(Role::Danger)));
+        assert!(!d.is_light()); // luma of the sample background is 0*299+200*587+7*114 /1000 = 118
+    }
+
+    #[test]
+    fn v2_unknown_roles_and_tags_are_kept_or_skipped_like_the_firmware() {
+        let mut b = vec![2u8, 1, 1, 2, 3, 2, 4, 5, 6, 0x20, 9, 9, 9, 0x50, 2, 0xAA, 0xBB];
+        let d = decode_v2(&b).unwrap();
+        assert_eq!(d.colors.len(), 3); // role 0x20 is carried (a newer sender), tag 0x50 skipped
+        assert!(d.name.is_none());
+        b.extend_from_slice(&[3, 1]); // dangling partial record: parsing stops, packet still valid
+        assert!(decode_v2(&b).is_ok());
+        assert!(decode_v2(&[2, 1, 1, 2, 3]).is_err()); // no foreground
+        assert!(matches!(decode_v2(&[7, 0]), Err(DecodeError::UnsupportedVersion(7))));
     }
 }

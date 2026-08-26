@@ -1,0 +1,27 @@
+# User service: broadcast the current Omarchy theme as a BLE beacon, scan for the watch's
+# requests, and serve the hook's `sync` over the daemon socket (protocol/BEACON.md).
+#
+#   cp systemd/themesync.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now themesync
+#   journalctl --user -u themesync -f
+#
+# Development loop (the daemon is under active development):
+#   cargo install --path host && systemctl --user restart themesync
+#
+# --no-gatt: the watch receives the beacon, so no GATT push per change. Drop the flag to get
+# the one-shot GATT push back (e.g. for a receiver that cannot scan extended advertising).
+# Needs bluez. The request scan keeps the adapter in passive LE scanning; if A2DP audio on the
+# same adapter stutters, stop the service and report it.
+[Unit]
+Description=Omarchy theme beacon + watch request scanner (themesync daemon)
+After=bluetooth.target graphical-session.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/themesync daemon --no-gatt
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

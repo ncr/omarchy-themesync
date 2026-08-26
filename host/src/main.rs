@@ -1,15 +1,17 @@
-//! `omawatch` — push the active Omarchy theme to a smartwatch (Theme Protocol v1 over BLE).
+//! `themesync` — push the active Omarchy theme to external devices (the OW-Watch first).
 //!
 //! ```text
-//! omawatch theme [--file F] [--json] [--source] [--contrast]   resolved watch palette
-//! omawatch encode [--file F] [--hex|--raw]                     the v1 packet
-//! omawatch decode <hex|-> [--json]                             simulated watch receiver
-//! omawatch demo [--file F]                                     the whole chain, printed
-//! omawatch sync [--file F] [--direct] [--retries N]            push to the watch
-//! omawatch daemon                                              resident link + bidi control
-//! omawatch scan / status / next / prev / toggle / install-hook
+//! themesync theme [--file F] [--json] [--source] [--contrast]   resolved watch palette
+//! themesync encode [--file F] [--hex|--raw]                     the Theme Protocol v1 packet
+//! themesync decode <hex|-> [--json]                             simulated v1 receiver
+//! themesync demo [--file F]                                     the v1 chain, printed
+//! themesync sync [--file F] [--direct] [--proto v2|mini|v1]     push to the watch (daemon or one-shot GATT)
+//! themesync daemon [--no-gatt]                                  state beacon + request scanner (protocol/BEACON.md)
+//! themesync pair                                                pairing key for beacon requests
+//! themesync scan / status / next / prev / install-hook
 //! ```
 
+mod beacon;
 mod daemon;
 mod omarchy;
 mod palette;
@@ -18,7 +20,7 @@ mod transport;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -30,7 +32,7 @@ use transport::ipc::{self, Reply, Request};
 use transport::sim::{self, SimWatch};
 
 #[derive(Parser)]
-#[command(name = "omawatch", version, about = "Sync the Omarchy desktop theme to a smartwatch over BLE")]
+#[command(name = "themesync", version, about = "Push the Omarchy desktop theme to external devices (smartwatch over BLE first)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -45,7 +47,7 @@ struct ThemeSource {
 
 #[derive(Args, Clone)]
 struct BleArgs {
-    /// Only accept a watch advertising this name (env: OMAWATCH_NAME).
+    /// Only accept a watch advertising this name (env: THEMESYNC_NAME).
     #[arg(long)]
     name: Option<String>,
     /// Seconds to scan for the watch before giving up (per attempt).
@@ -87,7 +89,7 @@ enum Cmd {
         /// Plain hex on one line (default is an annotated dump).
         #[arg(long)]
         hex: bool,
-        /// Raw bytes to stdout (pipe into the C simulator: `omawatch encode --raw | watch/sim/theme_sim`).
+        /// Raw bytes to stdout (pipe into the C simulator: `themesync encode --raw | watch/sim/theme_sim`).
         #[arg(long)]
         raw: bool,
     },
@@ -118,15 +120,27 @@ enum Cmd {
         /// Return immediately after handing the job to a background process (for hooks).
         #[arg(long)]
         r#async: bool,
-        /// Wire format: `v1` (Theme Protocol v1, default) or `mini` (the 13-byte prototype
-        /// format of the onewheel watch's first firmware).
-        #[arg(long, default_value = "v1")]
+        /// Wire format on the OW-Watch service 7a0e0001: `v2` (default: the firmware's
+        /// role-tagged packet, every role) or `mini` (the 13-byte core-four packet);
+        /// `v1` is Theme Protocol v1 on service 7e450001 (not on any device yet).
+        #[arg(long, default_value = "v2")]
         proto: String,
     },
-    /// Keep a connection open, serve `sync` requests, and act on the watch's requests.
+    /// Advertise the current theme as a beacon, scan for the watch's requests, serve `sync`.
     Daemon {
         #[command(flatten)]
         ble: BleArgs,
+        /// Do not also push each change over a one-shot GATT connection (the pre-beacon path).
+        #[arg(long)]
+        no_gatt: bool,
+    },
+    /// Pair with the watch: new key over GATT (7a0e0005) + a 2-digit code to confirm on the watch.
+    Pair {
+        #[command(flatten)]
+        ble: BleArgs,
+        /// Only write ~/.config/themesync/key; skip the watch.
+        #[arg(long)]
+        no_watch: bool,
     },
     /// List nearby BLE devices, flagging the ones advertising the Theme service.
     Scan {
@@ -142,8 +156,6 @@ enum Cmd {
     Next,
     /// Switch Omarchy to the previous theme.
     Prev,
-    /// Switch Omarchy to the next theme of the opposite light/dark mode.
-    Toggle,
     /// Install the theme-set hook into ~/.config/omarchy/hooks/theme-set.d/.
     InstallHook {
         /// Print the hook instead of writing it.
@@ -162,31 +174,32 @@ fn use_ansi() -> bool {
 }
 
 fn hook_script() -> String {
-    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "omawatch".into());
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "themesync".into());
     format!(
         "#!/bin/bash\n\
-         # Omarchy theme-set hook: push the new theme to the watch. Installed by `omawatch install-hook`.\n\
+         # Omarchy theme-set hook: push the new theme to the watch. Installed by `themesync install-hook`.\n\
          # Omarchy runs this synchronously (bash <file> <theme-slug>) after the theme directory swap\n\
          # and all app retints, so return fast: the daemon (or a background one-shot) does the BLE work.\n\
-         OMAWATCH=\"${{OMAWATCH_BIN:-{exe}}}\"\n\
-         command -v \"$OMAWATCH\" >/dev/null 2>&1 || OMAWATCH=omawatch\n\
-         \"$OMAWATCH\" sync --async >/dev/null 2>&1 || true\n"
+         THEMESYNC=\"${{THEMESYNC_BIN:-{exe}}}\"\n\
+         command -v \"$THEMESYNC\" >/dev/null 2>&1 || THEMESYNC=themesync\n\
+         \"$THEMESYNC\" sync --async >/dev/null 2>&1 || true\n"
     )
 }
 
 async fn sync_via_daemon(src: &ThemeSource) -> Result<Option<Reply>> {
     let req = match &src.file {
         None => Request::Sync,
-        Some(_) => Request::Push { packet_hex: protocol::to_hex(&protocol::encode_theme(&resolve(src)?)) },
+        Some(_) => Request::Push { packet_hex: protocol::to_hex(&protocol::encode_v2(&resolve(src)?, false)) },
     };
     ipc::request(&req, Duration::from_secs(25)).await
 }
 
-async fn sync_direct(src: &ThemeSource, opts: &BleOptions, retries: u32) -> Result<()> {
+/// Theme Protocol v1 over its own service (7e450001): no device speaks it yet.
+async fn sync_v1(src: &ThemeSource, opts: &BleOptions, retries: u32) -> Result<()> {
     let p = resolve(src)?;
     let packet = protocol::encode_theme(&p);
     let adapter = ble::adapter().await?;
-    let watch = ble::connect_with_retry(&adapter, opts, retries, |m| eprintln!("[omawatch] {m}")).await?;
+    let watch = ble::connect_with_retry(&adapter, opts, retries, |m| eprintln!("[themesync] {m}")).await?;
     if let Ok(Some(info)) = watch.info().await {
         if !info.supports(protocol::VERSION) {
             watch.disconnect().await;
@@ -203,40 +216,64 @@ async fn sync_direct(src: &ThemeSource, opts: &BleOptions, retries: u32) -> Resu
     Ok(())
 }
 
-/// Push through the 13-byte "mini" adapter (see `transport::ble::mini_wire`).
-async fn sync_mini(src: &ThemeSource, opts: &BleOptions, retries: u32) -> Result<()> {
-    let p = resolve(src)?;
-    let wire = ble::mini_wire(&p);
+/// Find the watch's theme service (7a0e0001) with retries.
+async fn find_watch(opts: &BleOptions, retries: u32) -> Result<(btleplug::platform::Adapter, btleplug::platform::Peripheral)> {
     let adapter = ble::adapter().await?;
     let mut delay = Duration::from_millis(500);
     let mut attempt = 0;
-    let peripheral = loop {
+    loop {
         attempt += 1;
         match ble::discover_service(&adapter, opts, ble::MINI_SERVICE_UUID).await {
-            Ok(per) => break per,
+            Ok(per) => return Ok((adapter, per)),
             Err(e) if attempt < retries => {
-                eprintln!("[omawatch] attempt {attempt}: {e:#}; retrying in {delay:?}");
+                eprintln!("[themesync] attempt {attempt}: {e:#}; retrying in {delay:?}");
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(15));
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+/// One-shot GATT push in the OW-Watch's own formats: `v2` (every role) or `mini` (13 bytes
+/// + the legacy name characteristic). Reads the applied palette back and compares.
+async fn sync_gatt(src: &ThemeSource, opts: &BleOptions, retries: u32, proto: &str) -> Result<()> {
+    let p = resolve(src)?;
+    let (wire, name, sent_roles): (Vec<u8>, Option<&str>, Vec<palette::Role>) = if proto == "mini" {
+        (protocol::encode_v1_legacy(&p).to_vec(), Some(&p.name), vec![palette::Role::Background, palette::Role::TextPrimary, palette::Role::Accent, palette::Role::Danger])
+    } else {
+        (protocol::encode_v2(&p, false), None, palette::Role::ALL.to_vec())
     };
-    let result = ble::send_mini(&peripheral, &wire, &p.name).await;
-    let _ = btleplug::api::Peripheral::disconnect(&peripheral).await;
-    let back = result?;
-    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-    println!(
-        "mini: sent {} = bg #{} fg #{} accent #{} color1 #{}; read back {}",
-        p.name,
-        hex(&wire[1..4]),
-        hex(&wire[4..7]),
-        hex(&wire[7..10]),
-        hex(&wire[10..13]),
-        if back == wire { "OK (identical)" } else { "MISMATCH" }
-    );
-    if back != wire {
-        bail!("watch returned {}", hex(&back));
+    // Retry the whole find + connect + write step: BlueZ occasionally aborts a fresh
+    // connection (`le-connection-abort-by-local`) right after another client's scan ended.
+    let attempts = retries.max(1);
+    let mut back = Vec::new();
+    for attempt in 1..=attempts {
+        let (_adapter, peripheral) = find_watch(opts, attempts).await?;
+        let result = ble::send_colors(&peripheral, &wire, name).await;
+        let _ = btleplug::api::Peripheral::disconnect(&peripheral).await;
+        match result {
+            Ok(b) => { back = b; break; }
+            Err(e) if attempt < attempts => {
+                eprintln!("[themesync] attempt {attempt}: {e:#}; retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    match protocol::decode_v2(&back) {
+        Ok(d) => {
+            let wrong: Vec<String> = sent_roles
+                .iter()
+                .filter(|r| d.get(**r) != Some(p.get(**r)))
+                .map(|r| format!("{} sent {} got {}", r.name(), p.get(*r), d.get(*r).map(|c| c.to_hex()).unwrap_or_else(|| "-".into())))
+                .collect();
+            println!("sent {} ({proto}, {} bytes); watch applied {}{}", p.name, wire.len(), d.summary(), if wrong.is_empty() { ": all sent roles match".to_string() } else { format!("; MISMATCH: {}", wrong.join(", ")) });
+            if !wrong.is_empty() {
+                bail!("read-back differs from what was sent");
+            }
+        }
+        Err(e) => println!("sent {} ({proto}, {} bytes); read back {} bytes, not decodable: {e}", p.name, wire.len(), back.len()),
     }
     Ok(())
 }
@@ -322,8 +359,8 @@ async fn main() -> Result<()> {
             print!("{}", sim::render_contrast(&applied));
         }
         Cmd::Sync { src, ble, direct, retries, r#async, proto } => {
-            if !matches!(proto.as_str(), "v1" | "mini") {
-                bail!("--proto must be v1 or mini");
+            if !matches!(proto.as_str(), "v2" | "mini" | "v1") {
+                bail!("--proto must be v2, mini or v1");
             }
             if r#async {
                 // Re-exec ourselves detached so the Omarchy hook returns immediately.
@@ -345,22 +382,72 @@ async fn main() -> Result<()> {
                 cmd.spawn().context("spawning background sync")?;
                 return Ok(());
             }
-            if proto == "mini" {
-                return sync_mini(&src, &ble.options(), retries.max(1)).await;
-            }
             if !direct {
                 match sync_via_daemon(&src).await? {
                     Some(r) if r.ok => {
-                        println!("sent via daemon to {}{}", r.watch.unwrap_or_default(), r.theme.map(|t| format!(" ({t})")).unwrap_or_default());
+                        println!("sent via daemon ({}){}", r.watch.unwrap_or_default(), r.theme.map(|t| format!(": {t}")).unwrap_or_default());
                         return Ok(());
                     }
                     Some(r) => bail!("daemon: {}", r.message.unwrap_or_default()),
                     None => {}
                 }
             }
-            sync_direct(&src, &ble.options(), retries).await?;
+            if proto == "v1" {
+                sync_v1(&src, &ble.options(), retries).await?;
+            } else {
+                sync_gatt(&src, &ble.options(), retries, &proto).await?;
+            }
         }
-        Cmd::Daemon { ble } => daemon::run(ble.options()).await?,
+        Cmd::Daemon { ble, no_gatt } => daemon::run(daemon::Options { ble: ble.options(), gatt: !no_gatt }).await?,
+        Cmd::Pair { ble, no_watch } => {
+            let key = beacon::new_key().context("reading /dev/urandom")?;
+            if no_watch {
+                let path = beacon::save_key(&key)?;
+                println!("key written to {} (no watch involved; restart the daemon to use it)", path.display());
+                return Ok(());
+            }
+            let code = beacon::new_key().context("reading /dev/urandom")?[0];
+            // Hand the key to the daemon as *pending*: it becomes active only when the watch
+            // sends a request signed with it, i.e. after the code was entered correctly.
+            let daemon = match ipc::request(&Request::PairPending { key_hex: protocol::to_hex(&key) }, Duration::from_secs(5)).await? {
+                Some(r) if r.ok => true,
+                Some(r) => bail!("daemon refused the pending key: {}", r.message.unwrap_or_default()),
+                None => false,
+            };
+            if !daemon {
+                println!("note: no daemon running — the key is saved right away and cannot be confirmed here");
+                beacon::save_key(&key)?;
+            }
+            let (_adapter, peripheral) = find_watch(&ble.options(), 3).await?;
+            let r = ble::write_characteristic(&peripheral, ble::MINI_CHR_KEY, &beacon::encode_pair_write(code, &key)).await;
+            let _ = btleplug::api::Peripheral::disconnect(&peripheral).await;
+            r.context("sending the pairing request to the watch")?;
+            println!();
+            println!("    ┌──────────────┐");
+            println!("    │   code  {:X} {:X}   │", code >> 4, code & 0x0f);
+            println!("    └──────────────┘");
+            println!();
+            println!("enter it on the watch's Pairing screen and confirm.");
+            if !daemon {
+                return Ok(());
+            }
+            let deadline = Instant::now() + Duration::from_secs(120);
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let Some(r) = ipc::request(&Request::Status, Duration::from_secs(5)).await? else { bail!("daemon went away") };
+                let state = r.message.unwrap_or_default();
+                if state.starts_with("paired with") {
+                    println!("{state}: the watch answered with the new key; it is now the active key.");
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    println!("no confirmation from the watch within 120 s.");
+                    println!("If the watch showed \"paired\", nothing is lost: the daemon keeps the pending key and the");
+                    println!("watch's next request completes the pairing. If it showed \"wrong code\", run `themesync pair` again.");
+                    break;
+                }
+            }
+        }
         Cmd::Scan { ble } => {
             let adapter = ble::adapter().await?;
             eprintln!("scanning for {}s...", ble.timeout);
@@ -377,10 +464,17 @@ async fn main() -> Result<()> {
                 if let Some(w) = r.watch {
                     println!("watch:  {w}");
                 }
+                if let Some(t) = r.theme {
+                    println!("theme:  {t}");
+                }
+                return Ok(());
+            }
+            if ble.name.is_none() {
+                println!("daemon: not running (systemctl --user status themesync); pass --name to query a Theme Protocol v1 device over GATT instead");
                 return Ok(());
             }
             let adapter = ble::adapter().await?;
-            let watch = ble::connect_with_retry(&adapter, &ble.options(), 2, |m| eprintln!("[omawatch] {m}")).await?;
+            let watch = ble::connect_with_retry(&adapter, &ble.options(), 2, |m| eprintln!("[themesync] {m}")).await?;
             println!("watch:  {}", watch.name);
             match watch.info().await? {
                 Some(i) => println!("info:   protocol v{}..v{}, {} colour slots, features {:#04x}", i.proto_min, i.proto_max, i.max_colors, i.features),
@@ -410,12 +504,6 @@ async fn main() -> Result<()> {
             println!("omarchy-theme-set {t}");
             om.set_theme(&t)?;
         }
-        Cmd::Toggle => {
-            let om = Omarchy::from_env()?;
-            let t = om.opposite_mode_theme().ok_or_else(|| anyhow!("no theme of the opposite mode installed"))?;
-            println!("omarchy-theme-set {t}");
-            om.set_theme(&t)?;
-        }
         Cmd::InstallHook { print } => {
             let script = hook_script();
             if print {
@@ -425,7 +513,7 @@ async fn main() -> Result<()> {
             let om = Omarchy::from_env()?;
             let dir = om.hooks_dir();
             std::fs::create_dir_all(&dir)?;
-            let path = dir.join("omawatch");
+            let path = dir.join("themesync");
             std::fs::write(&path, script)?;
             #[cfg(unix)]
             {

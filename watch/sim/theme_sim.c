@@ -1,6 +1,6 @@
 // Simulated watch receiver, built from the firmware's own decoder (../common/theme_proto.c).
 //
-//   omawatch encode --raw --file tokyo-night.toml | ./theme_sim
+//   themesync encode --raw --file tokyo-night.toml | ./theme_sim
 //   ./theme_sim 5448010e...        (hex on the command line)
 //   ./theme_sim --selftest         (encode/decode round trip + corruption checks)
 //

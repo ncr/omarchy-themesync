@@ -62,7 +62,8 @@ theme_result_t theme_proto_decode(const uint8_t *buf, size_t len, theme_packet_t
 
 size_t theme_proto_encode(const theme_packet_t *in, uint8_t *buf, size_t cap)
 {
-    const size_t name_len = strnlen(in->name, THEME_PROTO_MAX_NAME);
+    size_t name_len = 0; /* strnlen is POSIX, not C11: keep the file buildable with -std=c11 */
+    while (name_len < THEME_PROTO_MAX_NAME && in->name[name_len] != '\0') name_len++;
     const size_t need = THEME_PROTO_HEADER_LEN + 3u * THEME_ROLE_COUNT + (name_len ? 2 + name_len : 0) + THEME_PROTO_CRC_LEN;
     if (cap < need) return 0;
     size_t o = 0;
