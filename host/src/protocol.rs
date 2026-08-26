@@ -549,6 +549,10 @@ pub const V2_MAX_NAME: usize = 31;
 pub const V2_TAG_PREV: u8 = 0x42;
 pub const V2_TAG_NEXT: u8 = 0x43;
 pub const V2_NEIGHBOUR_NAME: usize = 20;
+/// Beacon-only: `[0x44][1][nonce]` — the nonce of the watch request this theme answers, or
+/// [`V2_ACK_NONE`] when the desktop changed on its own (protocol/BEACON.md §1).
+pub const V2_TAG_ACK: u8 = 0x44;
+pub const V2_ACK_NONE: u8 = 0x00;
 
 /// A neighbour theme as carried in the beacon: slug + the four core colours.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,6 +580,11 @@ pub fn v2_append_neighbour(packet: &mut Vec<u8>, tag: u8, n: &Neighbour) {
         packet.extend_from_slice(&[c.r, c.g, c.b]);
     }
     packet.extend_from_slice(name.as_bytes());
+}
+
+/// Append the `0x44` ack record to a beacon packet.
+pub fn v2_append_ack(packet: &mut Vec<u8>, nonce: u8) {
+    packet.extend_from_slice(&[V2_TAG_ACK, 1, nonce]);
 }
 
 /// Firmware role ids (`theme_role_t`), append-only on their side. `cursor` (15) has no
@@ -660,6 +669,8 @@ pub struct V2Packet {
     pub force_black: bool,
     pub prev: Option<Neighbour>,
     pub next: Option<Neighbour>,
+    /// The `0x44` record: `Some(nonce)`; `Some(V2_ACK_NONE)` = desktop-initiated.
+    pub ack: Option<u8>,
 }
 
 impl V2Packet {
@@ -724,6 +735,8 @@ pub fn decode_v2(b: &[u8]) -> Result<V2Packet, DecodeError> {
                 let core = [0, 3, 6, 9].map(|o| Rgb::new(v[o], v[o + 1], v[o + 2]));
                 let nb = Neighbour { name: String::from_utf8_lossy(&v[12..]).into_owned(), core };
                 if tag == V2_TAG_PREV { out.prev = Some(nb) } else { out.next = Some(nb) }
+            } else if tag == V2_TAG_ACK && n >= 1 {
+                out.ack = Some(v[0]);
             }
             i += 2 + n;
         }
@@ -777,6 +790,12 @@ mod v2_tests {
         assert_eq!(d.prev.as_ref().unwrap().core[2], q.get(Role::Accent));
         assert_eq!(d.next.as_ref().unwrap().name, "nord");
         assert_eq!(bytes.len(), base_len + 2 + 12 + 20 + 2 + 12 + 4);
+        assert_eq!(d.ack, None);
+        v2_append_ack(&mut bytes, 0xA5);
+        let d = decode_v2(&bytes).unwrap();
+        assert_eq!(d.ack, Some(0xA5));
+        assert_eq!(&bytes[bytes.len() - 3..], &[V2_TAG_ACK, 1, 0xA5]);
+        assert_eq!(d.colors.len(), Role::COUNT);
     }
 
     #[test]

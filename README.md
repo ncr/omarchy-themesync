@@ -108,9 +108,10 @@ Verified 2026-08-26 on the device: 70 bytes out, "15 roles, all sent roles match
 **Two-way, connection-less (`protocol/BEACON.md`).** `themesync daemon` broadcasts the
 current theme as an extended advertisement (manufacturer data `0xFFFF`: `'T' 0x01 seq host`
 + the v2 packet + the previous/next themes as records `0x42`/`0x43`, so the watch can show
-"prev | current | next") and scans passively for the watch's requests (`'T' 0x02 nonce op
-arg mac`, HMAC-keyed; NEXT/PREV/SET/RESEND → `omarchy-theme-set`; TOGGLE was dropped —
-Omarchy themes have no light/dark pairs). No time and no counters in
+"prev | current | next", + `0x44` = the nonce of the watch request this theme answers) and
+scans passively for the watch's requests (`'T' 0x02 nonce op arg mac`, HMAC-keyed;
+NEXT/PREV/SET → `omarchy-theme-set`, one at a time in order; RESEND → a burst; LIST → the
+theme list; TOGGLE was dropped — Omarchy themes have no light/dark pairs). No time and no counters in
 any packet. Pairing (§2b): `themesync pair` hands the daemon a *pending* key, writes
 `[0x01][code][key]` to the watch over GATT and prints the two-digit code; the watch shows a
 roller screen, and a request signed with the new key (the watch's RESEND after a correct
@@ -129,7 +130,7 @@ Firmware side of the v1 design: `watch/esp32-lvgl/INTEGRATION.md`.
 
 #### Status (2026-08-26)
 
-* Host: 40 unit tests (v1 protocol, v2 codec, beacon packets/MAC, theme list + frames,
+* Host: 42 unit tests (v1 protocol, v2 codec, beacon packets/MAC/ack, theme list + frames,
   mapping, resolver parity). Builds on Linux and macOS; the daemon (BlueZ over D-Bus) is
   compiled in on Linux only, the GATT commands (`sync --direct`, `push-list --direct`,
   `pair`) work on both.

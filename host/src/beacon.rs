@@ -160,6 +160,42 @@ pub fn decode_request(key: &[u8], b: &[u8]) -> Result<Request, RequestError> {
     Ok(Request { nonce: b[2], op, arg: u16::from_le_bytes([b[4], b[5]]) })
 }
 
+/// Which watch request a theme change answers (the beacon's `0x44` record). The daemon notes
+/// `(nonce, target slug)` before it runs `omarchy-theme-set`; when the hook's `sync` comes
+/// back with the active slug, the most recent matching note is consumed and its nonce goes
+/// out with the beacon. Matching by slug instead of "whatever is in flight" survives the
+/// hook's `sync --async` landing after the request finished, and a desktop-initiated change
+/// to some other theme is reported as none. Notes expire so a theme the user picks on the
+/// desktop minutes later is not mistaken for a late answer.
+#[derive(Debug, Default)]
+pub struct AckLog {
+    notes: Vec<(std::time::Instant, u8, String)>,
+}
+
+impl AckLog {
+    pub const TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+    pub fn note(&mut self, nonce: u8, slug: &str) {
+        self.prune();
+        self.notes.push((std::time::Instant::now(), nonce, slug.to_string()));
+    }
+
+    /// The nonce to acknowledge for a change to `slug`, consumed; `V2_ACK_NONE` if no
+    /// recent request targeted it.
+    pub fn take(&mut self, slug: &str) -> u8 {
+        self.prune();
+        match self.notes.iter().rposition(|(_, _, s)| s == slug) {
+            Some(i) => self.notes.remove(i).1,
+            None => crate::protocol::V2_ACK_NONE,
+        }
+    }
+
+    fn prune(&mut self) {
+        let now = std::time::Instant::now();
+        self.notes.retain(|(t, _, _)| now.duration_since(*t) < Self::TTL);
+    }
+}
+
 /// True for any packet of ours (either kind), so the scanner can skip other 0xFFFF users.
 pub fn is_ours(b: &[u8]) -> bool {
     b.len() >= 2 && b[0] == MAGIC && (b[1] == KIND_STATE || b[1] == KIND_REQUEST)
@@ -299,6 +335,20 @@ mod tests {
         assert_eq!(w.len(), PAIR_WRITE_LEN);
         assert_eq!(&w[..2], &[PAIR_WRITE_TAG, 0x7C]);
         assert_eq!(&w[2..], &new);
+    }
+
+    #[test]
+    fn ack_log_matches_by_slug_latest_first_and_consumes() {
+        let mut log = AckLog::default();
+        assert_eq!(log.take("nord"), crate::protocol::V2_ACK_NONE);
+        log.note(0x11, "nord"); // NEXT -> nord
+        log.note(0x22, "rose-pine"); // NEXT again -> rose-pine, before nord's sync came back
+        assert_eq!(log.take("nord"), 0x11);
+        assert_eq!(log.take("nord"), crate::protocol::V2_ACK_NONE); // consumed
+        log.note(0x33, "rose-pine"); // a third press to the same theme: the latest wins
+        assert_eq!(log.take("rose-pine"), 0x33);
+        assert_eq!(log.take("rose-pine"), 0x22);
+        assert_eq!(log.take("gruvbox"), crate::protocol::V2_ACK_NONE); // desktop-initiated
     }
 
     #[test]

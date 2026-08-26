@@ -21,7 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
-use crate::beacon::{self, Op, Request as BeaconRequest, Verified};
+use crate::beacon::{self, AckLog, Op, Request as BeaconRequest, Verified};
 use crate::omarchy::Omarchy;
 use crate::palette::map_source;
 use crate::protocol;
@@ -45,12 +45,20 @@ fn log(msg: &str) {
 /// `omarchy-theme-list` order (tags 0x42/0x43) so the watch can show where PREV/NEXT lead.
 fn describe(wire: &[u8]) -> String {
     match protocol::decode_v2(wire) {
-        Ok(d) => format!("{} bytes; prev {}, next {}", wire.len(), d.prev.map(|n| n.name).unwrap_or_else(|| "-".into()), d.next.map(|n| n.name).unwrap_or_else(|| "-".into())),
+        Ok(d) => format!(
+            "{} bytes; prev {}, next {}; ack {}",
+            wire.len(),
+            d.prev.map(|n| n.name).unwrap_or_else(|| "-".into()),
+            d.next.map(|n| n.name).unwrap_or_else(|| "-".into()),
+            match d.ack { Some(protocol::V2_ACK_NONE) | None => "none".to_string(), Some(n) => format!("nonce {n:#04x}") }
+        ),
         Err(_) => format!("{} bytes", wire.len()),
     }
 }
 
-fn current_theme() -> Result<(String, Vec<u8>)> {
+/// `ack` is the `0x44` record: the nonce of the watch request this theme answers, or
+/// `V2_ACK_NONE` for a change the desktop made on its own.
+fn current_theme(ack: u8) -> Result<(String, Vec<u8>)> {
     let om = Omarchy::from_env()?;
     let src = om.load_current()?;
     let p = map_source(&src)?;
@@ -63,6 +71,7 @@ fn current_theme() -> Result<(String, Vec<u8>)> {
             Err(e) => log(&format!("neighbour {slug}: {e:#}")),
         }
     }
+    protocol::v2_append_ack(&mut wire, ack);
     Ok((p.name.clone(), wire))
 }
 
@@ -112,22 +121,36 @@ async fn serve_socket(tx: mpsc::Sender<Ipc>) -> Result<()> {
 }
 
 
-/// What the watch asked for, translated into an Omarchy action. Blocking (theme-set takes
-/// seconds), so it runs on the blocking pool.
-fn act(om: &Omarchy, req: BeaconRequest) -> Result<Option<String>> {
-    let target = match req.op {
+/// The theme a watch request asks for, resolved against the *current* desktop state (NEXT
+/// after NEXT steps twice, so requests must run one after another, in order).
+fn target_of(om: &Omarchy, req: BeaconRequest) -> Option<String> {
+    match req.op {
         Op::Next => om.neighbour_theme(1),
         Op::Prev => om.neighbour_theme(-1),
         Op::Set => om.list_themes().into_iter().find(|s| beacon::slug_id(s) == req.arg),
-        Op::Resend | Op::List => return Ok(None), // handled in the loop, no theme change
-    };
-    let Some(name) = target else {
-        log(&format!("{:?} (arg {:#06x}): no matching theme", req.op, req.arg));
-        return Ok(None);
-    };
-    log(&format!("{:?} -> omarchy-theme-set {name}", req.op));
-    om.set_theme(&name)?;
-    Ok(Some(name))
+        Op::Resend | Op::List => None, // handled in the loop, no theme change
+    }
+}
+
+/// One thread runs the watch's theme requests strictly in order (`omarchy-theme-set` takes
+/// seconds and two at once would race each other). Each target is noted in the ack log
+/// before the change so the hook's `sync` can acknowledge it in the beacon.
+fn spawn_actor(om: Omarchy, acks: Arc<Mutex<AckLog>>) -> std::sync::mpsc::Sender<BeaconRequest> {
+    let (tx, rx) = std::sync::mpsc::channel::<BeaconRequest>();
+    std::thread::spawn(move || {
+        for req in rx {
+            let Some(name) = target_of(&om, req) else {
+                log(&format!("{:?} (arg {:#06x}): no matching theme", req.op, req.arg));
+                continue;
+            };
+            acks.lock().unwrap().note(req.nonce, &name);
+            log(&format!("{:?} nonce {:#04x} -> omarchy-theme-set {name}", req.op, req.nonce));
+            if let Err(e) = om.set_theme(&name) {
+                log(&format!("{:?} failed: {e:#}", req.op));
+            }
+        }
+    });
+    tx
 }
 
 /// One-shot GATT push of the current theme (the pre-beacon path), detached.
@@ -255,6 +278,8 @@ pub async fn run(opts: Options) -> Result<()> {
     }
     let host = beacon::host_id();
     let om = Omarchy::from_env().ok();
+    let acks: Arc<Mutex<AckLog>> = Arc::new(Mutex::new(AckLog::default()));
+    let actor = om.clone().map(|om| spawn_actor(om, acks.clone()));
 
     let (tx, mut rx) = mpsc::channel::<Ipc>(16);
     tokio::spawn(async move {
@@ -283,7 +308,7 @@ pub async fn run(opts: Options) -> Result<()> {
 
     // ---- state ----
     let mut seq: u8 = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) & 0xff) as u8;
-    let (mut theme_name, mut theme_wire) = match current_theme() {
+    let (mut theme_name, mut theme_wire) = match current_theme(protocol::V2_ACK_NONE) {
         Ok(t) => t,
         Err(e) => {
             log(&format!("no active Omarchy theme yet ({e:#}); beacon idle until the first sync"));
@@ -371,7 +396,11 @@ pub async fn run(opts: Options) -> Result<()> {
                         }
                         None => Reply::err("key_hex must be 32 hex digits"),
                     },
-                    Request::Sync => match current_theme() {
+                    Request::Sync => {
+                        // Which watch request (if any) this change answers: the ack log is
+                        // keyed by the slug the request targeted.
+                        let ack = Omarchy::from_env().ok().and_then(|o| o.current_theme_name()).map(|slug| acks.lock().unwrap().take(&slug)).unwrap_or(protocol::V2_ACK_NONE);
+                        match current_theme(ack) {
                         Ok((name, wire)) => {
                             theme_name = name.clone();
                             theme_wire = wire.clone();
@@ -383,7 +412,8 @@ pub async fn run(opts: Options) -> Result<()> {
                             Reply { theme: Some(name), connected: Some(true), watch: Some("beacon".into()), ..Reply::ok("sent") }
                         }
                         Err(e) => Reply::err(format!("{e:#}")),
-                    },
+                        }
+                    }
                     Request::Push { packet_hex } => match protocol::from_hex(&packet_hex) {
                         Some(wire) => {
                             theme_name = protocol::decode_v2(&wire).ok().and_then(|d| d.name).unwrap_or_default();
@@ -453,11 +483,9 @@ pub async fn run(opts: Options) -> Result<()> {
                             list_push(ListPushJob { opts: opts.ble.clone(), key, addr: watch_addr.clone(), force: true, reason: "request" }, list_gate.clone(), list_state.clone(), None);
                             continue;
                         }
-                        if let Some(om) = &om {
-                            let om = om.clone();
-                            tokio::task::spawn_blocking(move || {
-                                if let Err(e) = act(&om, req) { log(&format!("{:?} failed: {e:#}", req.op)); }
-                            });
+                        match &actor {
+                            Some(tx) => { let _ = tx.send(req); }
+                            None => log("no Omarchy install found: request dropped"),
                         }
                     }
                 }

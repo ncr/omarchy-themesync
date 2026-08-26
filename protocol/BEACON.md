@@ -41,8 +41,21 @@ off  size  field
                        0x42 previous theme, 0x43 next theme (omarchy-theme-list order,
                        wrapping): [len][bg r g b][fg r g b][accent r g b][alarm r g b]
                        [name UTF-8 ≤ 20 B]; len = 12 + name length.
-                     ~150 bytes with neighbours.
+                       0x44 ack [1][nonce] (added 2026-08-26): the nonce of the watch
+                       request this theme answers; 0x00 = none — the desktop changed on
+                       its own, or the change matched no recent request. Always present.
+                     ~153 bytes with neighbours and ack.
 ```
+
+The ack lets a receiver tell "this answers my request X" from "the desktop changed on its
+own" and from "this answers an older request of mine" (the watch applies a list entry
+locally before it asks, so two quick swipes must not flip it back to the first answer).
+The desktop notes (nonce → target slug) when it runs `omarchy-theme-set` for a request and
+stamps the nonce when the hook's `sync` reports that slug active; notes expire after 30 s
+and are consumed once. Because the ack is keyed by the target theme, it survives the hook's
+`sync --async` landing after the request finished. Requests run strictly in order on the
+desktop (NEXT after NEXT steps twice), never concurrently. A watch must not draw nonce 0x00
+for a request, or must treat an ack of 0x00 as "not for me".
 
 The neighbours exist so the watch can show "prev | current | next" the way Omarchy's own
 switcher does; after a NEXT/PREV the returning beacon carries the new current theme and
@@ -85,7 +98,8 @@ off  size  field
 Key: 16 random bytes, delivered by the pairing flow in §2b. Until paired the desktop ignores
 requests.
 
-Desktop acceptance: mac valid, and (address, nonce, op, arg) not seen in the last 60 s.
+Desktop acceptance: mac valid, and (address, nonce, op, arg) not the last one seen from
+that address (no expiry: BlueZ re-delivers cached data for a long time).
 A captured packet could be replayed later by someone who also holds the radio — the
 effect is one theme change, which is accepted as harmless.
 
