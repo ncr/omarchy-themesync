@@ -328,14 +328,24 @@ pub async fn discover_by_address(adapter: &Adapter, addr: &str, timeout: Duratio
     result
 }
 
-/// The watch at `addr` if it is known, else any watch advertising the theme service.
+/// The name the OW-Watch advertises. Since BEACON.md v3 its advertisement is non-scannable,
+/// so the service UUID (scan-response only) is never seen before connecting: an unpaired
+/// watch is found by this name, a paired one by the saved address.
+pub const WATCH_NAME: &str = "OW-Watch";
+
+/// The watch at `addr` if it is known, else the one advertising as [`WATCH_NAME`] (or
+/// `opts.name`), else — older firmware — any device advertising the theme service.
 pub async fn find_watch(adapter: &Adapter, opts: &BleOptions, addr: Option<&str>) -> Result<Peripheral> {
     if let Some(a) = addr {
         if let Ok(p) = discover_by_address(adapter, a, opts.scan_timeout).await {
             return Ok(p);
         }
     }
-    discover_service(adapter, opts, MINI_SERVICE_UUID).await
+    let mut by_name = opts.clone();
+    if by_name.name.is_none() {
+        by_name.name = Some(WATCH_NAME.into());
+    }
+    discover_service(adapter, &by_name, MINI_SERVICE_UUID).await
 }
 
 /// How a list push ended.

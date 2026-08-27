@@ -9,7 +9,7 @@
 //! themesync daemon [--no-gatt]                                  state beacon + request scanner (protocol/BEACON.md)
 //! themesync pair                                                pairing key for beacon requests
 //! themesync push-list [--force] [--dry-run] [--direct]          the theme list over GATT (protocol/BEACON.md §3)
-//! themesync scan / status / next / prev / install-hook
+//! themesync scan / status / reset-counter / install-hook
 //! ```
 
 // The beacon/request helpers are only called by the daemon, which is Linux-only.
@@ -178,10 +178,9 @@ enum Cmd {
         #[command(flatten)]
         ble: BleArgs,
     },
-    /// Switch Omarchy to the next theme (what the watch's NEXT button does).
-    Next,
-    /// Switch Omarchy to the previous theme.
-    Prev,
+    /// Forget the last accepted request counter (BEACON.md §2): after the watch was
+    /// reflashed and counts from 1 again. Prefer `themesync pair`, which resets both sides.
+    ResetCounter,
     /// Install the theme-set hook into ~/.config/omarchy/hooks/theme-set.d/.
     InstallHook {
         /// Print the hook instead of writing it.
@@ -242,14 +241,16 @@ async fn sync_v1(src: &ThemeSource, opts: &BleOptions, retries: u32) -> Result<(
     Ok(())
 }
 
-/// Find the watch's theme service (7a0e0001) with retries.
+/// Find the watch with retries: by the address saved at pairing, else by its advertised
+/// name (its advertisement is non-scannable, so the service UUID is not visible).
 async fn find_watch(opts: &BleOptions, retries: u32) -> Result<(btleplug::platform::Adapter, btleplug::platform::Peripheral)> {
     let adapter = ble::adapter().await?;
+    let saved = beacon::load_watch_addr();
     let mut delay = Duration::from_millis(500);
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match ble::discover_service(&adapter, opts, ble::MINI_SERVICE_UUID).await {
+        match ble::find_watch(&adapter, opts, saved.as_deref()).await {
             Ok(per) => return Ok((adapter, per)),
             Err(e) if attempt < retries => {
                 eprintln!("[themesync] attempt {attempt}: {e:#}; retrying in {delay:?}");
@@ -427,7 +428,7 @@ async fn main() -> Result<()> {
         #[cfg(target_os = "linux")]
         Cmd::Daemon { ble, no_gatt } => daemon::run(daemon::Options { ble: ble.options(), gatt: !no_gatt }).await?,
         #[cfg(not(target_os = "linux"))]
-        Cmd::Daemon { .. } => bail!("the daemon needs BlueZ (Linux): advertising and passive scanning go through D-Bus"),
+        Cmd::Daemon { .. } => bail!("the daemon needs BlueZ (Linux): advertising and scanning go through D-Bus"),
         Cmd::Pair { ble, no_watch } => {
             let key = beacon::new_key().context("reading /dev/urandom")?;
             if no_watch {
@@ -482,6 +483,9 @@ async fn main() -> Result<()> {
             if dry_run {
                 let om = Omarchy::from_env()?;
                 let built = themelist::build(&om);
+                if let Some((a, b)) = &built.collision {
+                    bail!("themes {a:?} and {b:?} share slug crc {:#06x}: a SET could not tell them apart; rename one", beacon::slug_id(a));
+                }
                 for (slug, why) in &built.skipped {
                     eprintln!("skipping {slug}: {why}");
                 }
@@ -591,17 +595,15 @@ async fn main() -> Result<()> {
             }
             watch.disconnect().await;
         }
-        Cmd::Next => {
-            let om = Omarchy::from_env()?;
-            let t = om.neighbour_theme(1).ok_or_else(|| anyhow!("no themes installed"))?;
-            println!("omarchy-theme-set {t}");
-            om.set_theme(&t)?;
-        }
-        Cmd::Prev => {
-            let om = Omarchy::from_env()?;
-            let t = om.neighbour_theme(-1).ok_or_else(|| anyhow!("no themes installed"))?;
-            println!("omarchy-theme-set {t}");
-            om.set_theme(&t)?;
+        Cmd::ResetCounter => {
+            match ipc::request(&Request::ResetCounter, Duration::from_secs(5)).await? {
+                Some(r) if r.ok => println!("daemon: {}", r.message.unwrap_or_default()),
+                Some(r) => bail!("daemon: {}", r.message.unwrap_or_default()),
+                None => {
+                    beacon::save_ctr(0)?;
+                    println!("counter reset in {} (no daemon running)", beacon::ctr_path().display());
+                }
+            }
         }
         Cmd::InstallHook { print } => {
             let script = hook_script();

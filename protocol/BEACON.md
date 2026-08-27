@@ -1,22 +1,57 @@
 # Theme beacon — connection-less theme sync over BLE advertising
 
-Draft 2026-08-26, reviewed by the watch side the same day. Between `omarchy-themesync`
-(desktop) and the OW-Watch firmware (`~/dev/onewheel/watch`). §1, §2 and §2b are verified on
-the device; §3 (the theme list) is implemented on the desktop and being built on the watch.
+**v3, 2026-08-27.** Between `omarchy-themesync` (desktop) and the OW-Watch firmware
+(`~/dev/onewheel/watch`). Rewritten after the independent review in
+`docs/review-2026-08-27.md`; no compatibility with v1 (2026-08-26) or v2 (2026-08-27 morning).
+What changed and why, in one line each:
+
+- The beacon carries **content and a MAC**, no `seq`, no `host`, no ack record. A receiver
+  applies a beacon when its theme bytes differ from what it is showing (reported state, like
+  an MQTT retained message), and verifies the MAC before applying. The review showed `seq`
+  stranding the watch (a beacon ignored while waiting for a request was recorded as applied),
+  a 1-in-256 silent ignore after a desktop restart, and an unauthenticated beacon writing the
+  watch's flash on every packet.
+- A request is answered when the beacon **shows the theme the request named** (the watch's
+  `theme_expect` rule); the nonce/ack machinery that did the same job a second way is gone.
+- The request carries a **monotonic counter** instead of a random nonce; the desktop accepts
+  only a counter greater than the last one accepted for the key. One rule replaces the
+  address-keyed dedup and the BlueZ-cache sweep at daemon start, and gives replay
+  protection for free.
+- The theme-list MAC covers the **transfer header** as well as the bytes.
+- **Reliable requests (added the same evening):** the beacon echoes the last request counter
+  the desktop accepted (`0x43`), and the watch retransmits until it sees its counter echoed
+  — stop-and-wait ARQ, the same shape as CoAP confirmable messages (RFC 7252), MQTT QoS 1
+  and BLE Mesh's segment acks. Before this a request lost on the air was a lost gesture
+  (on hardware: 6 of 16 in one series, every one a gesture made a few seconds after the
+  previous answer).
+- Radio: the desktop beacons at a **fixed 80 ms** (the 100–110 ms range plus the mandatory
+  0–10 ms advDelay could exceed the watch's 120 ms window); the watch advertises every
+  **1 s** when idle with an empty scan response (the desktop's scan is active, so the watch
+  answered a SCAN_RSP with the service UUID every 200 ms, forever) and 100 ms while a
+  request is on the air.
 
 Two independent broadcasts, no GATT connection needed for day-to-day use:
 
 ```
-desktop  ──(state beacon: the current theme, repeated forever)──▶  any receiver
-watch    ──(request: NEXT / PREV / SET / RESEND / LIST, repeated ≤10 s)──▶ desktop
-                                    ▲                                   │
-                                    └── the desktop applies it, its beacon changes,
-                                        the watch sees the change and stops asking
+desktop  ──(state beacon: the current theme + MAC, repeated forever)──▶  any receiver
+watch    ──(request: SET <theme> / RESEND / LIST, counter, MAC, ≤10 s)──▶ desktop
+                                    ▲                                        │
+                                    └── the desktop applies it; its beacon now shows
+                                        that theme; the watch sees it and stops asking
 ```
 
-The state beacon is the acknowledgement of a request. Both packets are Manufacturer
-Specific Data (AD type `0xFF`), company id `0xFFFF` (the "reserved for testing" id; the
-magic byte disambiguates from other 0xFFFF users). All multi-byte integers little-endian.
+Both packets are Manufacturer Specific Data (AD type `0xFF`), company id `0xFFFF` (the
+"reserved for testing" id; the magic byte disambiguates from other 0xFFFF users). All
+multi-byte integers little-endian. `crc16` = CRC-16/CCITT-FALSE. `mac4(k, m)` = the first 4
+bytes of HMAC-SHA256(k, m). The key `k` is the 16-byte pairing key (§2b). One desktop per
+watch: the key is the desktop's identity, so a watch follows exactly the desktop it paired with.
+
+The watch holds the theme list (§3): it is pushed right after pairing and whenever the watch
+asks. Every theme is addressed by `crc16(slug)` — the slug is the name `omarchy-theme-set`
+takes, e.g. `"tokyo-night"` → `0xAAE5`. The watch computes it from the `0x40` name of a list
+entry; the desktop resolves it against `omarchy-theme-list`. (Known weakness, accepted for
+now: ~0.4 % chance of a collision among 22 slugs; the desktop refuses to build a list with
+a collision. Planned replacement: `arg = [list index][list crc8]`, see §5.)
 
 ## 1. State beacon (desktop → receivers)
 
@@ -29,145 +64,213 @@ scanning gets nothing; that is accepted (the watch can: `CONFIG_BT_NIMBLE_50_FEA
 off  size  field
  0    1    magic     0x54 'T'
  1    1    kind      0x01 = theme state
- 2    1    seq       increments on every desktop theme change, wraps; receivers
-                     re-apply only when it differs from the last one they applied
- 3    1    host      crc8 of the desktop's hostname; lets a watch follow one desktop
-                     when two are in range (0x00 = "any", receivers may ignore)
- 4    n    theme     the OW-Watch `colors` packet, verbatim: v2 TLV
+ 2    n    theme     the OW-Watch `colors` packet, verbatim: v2 TLV
                      ([2][role r g b]*[0x40 len name][0x41 1 flags]) — same bytes the
                      desktop would write to characteristic 7a0e0002; the receiver hands
-                     them to theme_set_wire() unchanged — followed by two beacon-only
-                     meta records the theme parser skips:
-                       0x42 previous theme, 0x43 next theme (omarchy-theme-list order,
-                       wrapping): [len][bg r g b][fg r g b][accent r g b][alarm r g b]
-                       [name UTF-8 ≤ 20 B]; len = 12 + name length.
-                       0x44 ack [1][nonce] (added 2026-08-26): the nonce of the watch
-                       request this theme answers; 0x00 = none — the desktop changed on
-                       its own, or the change matched no recent request. Always present.
-                     ~153 bytes with neighbours and ack.
+                     them to theme_set_wire() unchanged. The 0x40 name is the theme SLUG.
+ 2+n  4    echo      [0x43][2][ctr u16 le] — the last request counter the desktop accepted
+                     under this key, 0 = none yet. The sender's ack number (§2).
+ 6+n  6    mac       [0x42][4][mac4(k, bytes 0 .. 6+n)] — always the last record; covers
+                     everything before it, the echo included.
+                     Both are meta records the theme parser skips. ~80 bytes in total.
 ```
 
-The ack lets a receiver tell "this answers my request X" from "the desktop changed on its
-own" and from "this answers an older request of mine" (the watch applies a list entry
-locally before it asks, so two quick swipes must not flip it back to the first answer).
-The desktop notes (nonce → target slug) when it runs `omarchy-theme-set` for a request and
-stamps the nonce when the hook's `sync` reports that slug active; notes expire after 30 s
-and are consumed once. Because the ack is keyed by the target theme, it survives the hook's
-`sync --async` landing after the request finished. Requests run strictly in order on the
-desktop (NEXT after NEXT steps twice), never concurrently. A watch must not draw nonce 0x00
-for a request, or must treat an ack of 0x00 as "not for me".
+**Apply rule (receiver).** Let `crc = crc16(bytes 2 .. 2+n)` (the theme bytes only — the
+echo changes with every request, the theme does not).
 
-The neighbours exist so the watch can show "prev | current | next" the way Omarchy's own
-switcher does; after a NEXT/PREV the returning beacon carries the new current theme and
-its new neighbours, so the screen re-renders from the beacon alone.
+1. `crc == applied_crc` and no request outstanding → nothing (the common case: the same
+   beacon hundreds of times). While a request is outstanding this shortcut is skipped: the
+   watch has already painted the list entry locally, and the beacon that answers carries
+   the same bytes (same encoder on the desktop) — it must still reach rule 4.
+2. Verify the mac. Bad → drop, count it (a stranger, or a desktop with another key).
+3. If a request is outstanding (`expect` = the slug it asked for) and the beacon's slug is
+   not `expect` → ignore, and **do not record anything** (the desktop changed on its own
+   while the request was in flight; the request's own answer is still coming).
+4. Apply, `applied_crc = crc`. If the slug equals `expect`: the request is answered — clear
+   `expect`, take the request off the air.
 
-Timing: 100 ms interval steady state (the desktop is mains powered); for 10 s after a
-change, 30 ms ("burst") so a scanning watch catches it on the first window. The receiver
-scans with a window ≥ 1 steady-state interval so one scan sees at least one beacon:
-recommendation for the watch, window 120 ms every 3 s while the screen is on, no scanning
-with the screen off (the theme cannot be seen then anyway) → ~4 % radio duty, ≤ 3 s latency.
+Persisting: the watch writes the theme to NVS only when it has been stable for 10 s and
+differs from what NVS holds (verified 2026-08-27: `saved to NVS: 'osaka-jade' (72 B,
+stable 10 s)`). Applying is cheap; flash is not, and only the MAC stands between
+a stranger and the watch's flash budget.
 
-No authentication: the worst an attacker can do is recolour the watch.
+There is no sequence number. A restarted desktop, a late joiner, a beacon delivered twice
+and two desktops in range (only one has the key) all converge on the content.
+
+**Timing.** Fixed 80 ms interval steady state (min = max; the controller adds 0–10 ms of
+advDelay per event, so the worst gap on a primary channel is 90 ms, inside the watch's 120 ms
+window with margin). For 10 s after a change, 30 ms ("burst") so a scanning watch catches
+it on the first window. The watch scans 120 ms every 2.56 s while the screen is on (≈4.7 %
+of radio time), one window immediately when the screen turns on, and 120 ms every 640 ms
+while it has a request on the air (≈19 %, ≤10 s); no scanning with the screen off (the
+theme cannot be seen then anyway). Worst-case latency for a desktop-initiated change,
+screen on: 2.56 s. The steady interval is to be measured once with `btmon` and the number
+recorded here — the daemon cannot see what BlueZ actually programmed.
 
 ## 2. Request (watch → desktop)
 
-Legacy advertising, added as one more AD structure to the watch's existing connectable
-advertisement (flags 3 B + name "OW-Watch" 10 B; the TX-power AD (3 B) is dropped to make
-room: 31 − 13 = 18 B = 4 B manufacturer header + 14 B payload). The 128-bit service UUID
-stays in the scan response as today.
+Legacy advertising, one more AD structure in the watch's connectable advertisement (flags
+3 B + name "OW-Watch" 10 B + 2 + 2 + 11 = 28 ≤ 31 B; the TX-power AD is dropped). A legacy
+connectable advertisement (ADV_IND) is scannable by definition, so the watch keeps a scan
+response but an **empty** one: the 128-bit service UUID is no longer advertised — the
+desktop connects by address (§3) and finds an unpaired watch by its name. (A connectable,
+non-scannable advertisement exists only as an extended PDU, which BlueZ/btleplug connect to
+less reliably; not worth it for one empty SCAN_RSP per second.)
 
 ```
 off  size  field
  0    1    magic     0x54 'T'
- 1    1    kind      0x02 = theme request
- 2    1    nonce     random byte drawn when the button is pressed; the same value is
-                     repeated for as long as that one press is advertised. Not a clock,
-                     not a counter, nothing persisted: it only lets the desktop tell
-                     "still the same press" from "pressed again".
- 3    1    op        0x01 NEXT   0x02 PREV   0x03 reserved (was TOGGLE, dropped 2026-08-26:
-                     Omarchy themes have no light/dark pairs, so it jumped to an unrelated
-                     theme)   0x04 SET   0x05 RESEND (please burst the state beacon)
-                     0x06 LIST (please push the theme list over GATT, §3)
- 4    2    arg       SET: crc16/CCITT-FALSE of the theme slug (e.g. "tokyo-night"); the
-                     desktop resolves it against `omarchy-theme-list`. Else 0.
- 6    4    mac       first 4 bytes of HMAC-SHA256(key, bytes 0..6)
+ 1    1    kind      0x03 = theme request (v3; v1/v2 requests were 0x02 and 10 bytes —
+                     a mixed pair fails on the kind, not on the length)
+ 2    2    ctr       monotonic counter, per pairing key (see below); never 0
+ 4    1    op        0x01 SET     switch to the theme in `arg`
+                     0x02 RESEND  please burst the state beacon
+                     0x03 LIST    please push the theme list over GATT (§3)
+ 5    2    arg       SET: crc16(slug). Else 0.
+ 7    4    mac       mac4(k, bytes 0 .. 7)
 ```
 
-10 bytes. There is no time and no sequence number anywhere in the protocol.
+11 bytes. No time anywhere in the protocol.
 
-Key: 16 random bytes, delivered by the pairing flow in §2b. Until paired the desktop ignores
-requests.
+**Counter.** Strictly increasing per key, u16, in the MAC. The desktop keeps the last
+accepted value next to the key (`~/.config/themesync/ctr`, written atomically: temp file +
+rename) and accepts a request iff `ctr > last`; on acceptance `last = ctr`. Gaps are fine
+(lost requests, crashed watch). Pairing (§2b) resets both sides: the desktop's `last` for the
+new key is 0, the watch starts at 1. The watch persists the counter in blocks: at boot it
+reads `next_block` from NVS, uses counters from there, and writes `next_block + 100` back —
+one flash write per 100 presses, a crash costs at most 100 values (BLE Mesh does the same
+with its sequence numbers). At 65 535 the watch stops sending and shows "re-pair".
 
-Desktop acceptance: mac valid, and (address, nonce, op, arg) not the last one seen from
-that address (no expiry: BlueZ re-delivers cached data for a long time).
-A captured packet could be replayed later by someone who also holds the radio — the
-effect is one theme change, which is accepted as harmless.
+**Desync is loud, never silent.** A request with `ctr <= last` (an erased watch after a
+reflash, a replay, a stale copy from BlueZ's cache) is dropped with a log line naming both
+numbers and the remedy (`themesync pair` again, or `themesync reset-counter` on a watch you
+trust), and `themesync status` shows the count of such drops. The desktop never accepts a
+backward jump on its own.
 
-The watch advertises the request for at most 10 s, or until the state beacon shows a `seq`
-newer than the one it saw when the user pressed the button; then it restores its normal
-advertising data. The desktop, on accepting: NEXT/PREV → `omarchy-theme-set` on the
-neighbour in `omarchy-theme-list` order; SET → the slug whose crc16 matches; RESEND → a
-beacon burst; LIST → a GATT connection to the requesting address and the §3 transfer.
-`omarchy-theme-set` takes 2–5 s (app retints); the hook then bumps `seq` and starts a burst.
+Acceptance on the desktop: kind and length right, mac valid under the active key (or the
+pending key: §2b), `ctr > last`. Nothing is keyed by the source address any more; the address
+of an accepted request is remembered only as where to connect for a list push.
 
-Desktop side runs one passive, duplicate-reporting scan continuously (BlueZ
-`SetDiscoveryFilter {DuplicateData: true, Transport: le}`); the daemon both advertises and
-scans, which the adapter supports concurrently.
+**On the air — stop-and-wait with retransmission.** One request outstanding at a time; the
+watch's state machine:
+
+```
+IDLE ──gesture (debounced ~300 ms)──▶ SENT      request on the air at 100 ms, ctr = next
+SENT ──beacon with echo ≥ ctr──▶ RECEIVED       the desktop has it; wait for the theme
+SENT ──no echo for 1.5 s──▶ retransmit          stop/start the advertisement with the same
+                                                bytes; wait 3 s, then 6 s; after the third
+                                                miss (~10.5 s) → IDLE, "no answer",
+                                                applied_crc forgotten
+RECEIVED ──beacon slug == expect, or list COMMIT──▶ IDLE   answered
+RECEIVED ──10 s without either──▶ IDLE          the desktop had it but did not apply it
+                                                (unknown slug and the list push failed, or
+                                                overridden); applied_crc forgotten
+any ──new gesture──▶ SENT with a new ctr        newest wins, nothing queues
+```
+
+Retransmitting the same counter is safe: the desktop either has it (drops it as already
+seen) or has not (accepts it) — at-least-once delivery, exactly-once effect. Leaving SENT or
+RECEIVED without an answer forgets `applied_crc`, so the very next beacon repaints the
+watch to the desktop's actual theme: the desktop is the source of truth and a lost request
+must never leave the watch on a theme the desktop does not have. Back in IDLE the
+advertisement returns to its 1 s interval. The watch shows the state (sent / received /
+applied) so "no answer" only ever means the desktop was unreachable for ~10 s.
+
+**The desktop, on accepting** — first, before anything else, it puts `ctr` into the beacon's
+echo and starts a burst, so the watch sees "received" within one scan window (≤ 0.64 s) and
+stops retransmitting while `omarchy-theme-set` is still running. Then:
+
+- SET, slug known → `omarchy-theme-set <slug>` (2–5 s, apps retint; the hook then triggers
+  a fresh beacon and a burst). Requests do not queue: while one `omarchy-theme-set` runs,
+  only the newest SET received is kept and runs next.
+- SET, slug unknown → the watch's list is stale (a theme removed or renamed since the push):
+  the desktop pushes the current list over GATT to the requesting address (§3) and changes
+  no theme. The COMMIT takes the SET off the air; the user picks again from the fresh list.
+- RESEND → nothing more (the echo burst above is the answer).
+- LIST → a GATT connection to the requesting address and the §3 transfer.
+
+**Desktop scan.** BlueZ discovery is an *active* scan (`SetDiscoveryFilter {DuplicateData:
+true, Transport: le}` has no passive option) — the desktop sends SCAN_REQs; that is why the
+watch's advertisement is non-scannable. The daemon takes the manufacturer data **out of the
+D-Bus property-changed signal** (`DeviceProperty::ManufacturerData`), never by re-reading the
+device after a wake-up: re-reading sampled BlueZ's cache and missed a request replaced within
+one round trip. It also never reads the cached value at start: BlueZ keeps a device's last
+manufacturer data long after the device stopped advertising it, and a minutes-old request
+would pass the counter check. A request on the air during the ~1 s of a daemon restart is
+lost; the watch times out after 10 s and repaints from the beacon. The daemon both advertises and scans; the adapter supports that concurrently.
 
 ## 2b. Pairing (the key, confirmed with a code on the watch)
 
 ```
 desktop: themesync pair
   key  = 16 random bytes,  code = 1 random byte, shown as two hex digits, e.g. "7C"
+  finds the watch by its advertised name (OW-Watch) or the address saved from a previous pairing
   GATT write to 7a0e0005-…  [0x01][code][key 16 B]        18 bytes, write-only characteristic
   prints the code, waits (≤ 120 s) for the watch's confirmation
 watch:  on that write → "Pairing" screen: two rollers 0-F (iOS-style wheel), OK
-  entered == code → key → NVS namespace "pair", then advertise a RESEND request signed
-                    with the NEW key (normal §2 request), show "paired"
+  entered == code → key → NVS namespace "pair", counter block reset (next request ctr = 1),
+                    then advertise a RESEND request signed with the NEW key, show "paired"
   entered != code → discard, show "wrong code", back to the previous screen
   no OK within 120 s → discard
 desktop: a §2 request whose MAC verifies with the pending key = confirmation:
-  the pending key becomes the active key (~/.config/themesync/key); the old key is kept
-  active until then, so a wrong code or a timeout changes nothing on either side.
+  the pending key becomes the active key (~/.config/themesync/key), last counter = that
+  request's ctr, the watch's address is saved (~/.config/themesync/watch) for list pushes;
+  the old key stays active until then, so a wrong code or a timeout changes nothing.
 ```
 
-The code is a confirmation, not key material (8 bits): it proves the person at the watch
-is the person who ran `pair`, and which watch is being paired. The key itself travels over
-GATT. Characteristic `…0005` accepts only this 18-byte form (no raw 16-byte key write);
-write-only, not readable. A watch with no key in NVS may ship a build-time default key so
-the request path can be exercised before the first pairing; the first successful pairing
-replaces it.
+The code is a confirmation, not key material (8 bits): it proves the person at the watch is
+the person who ran `pair`, and which watch is being paired. The key itself travels over
+GATT. Characteristic `…0005` accepts only this 18-byte form; write-only, not readable.
 
-## 2a. Priority on the watch
+Known weaknesses, accepted for now and listed in §5: the key travels in clear over an
+unencrypted link (a sniffer within range during the pairing window gets it); any central
+can open the Pairing screen on the watch; a build-time default key may exist in the firmware
+for bench work and must not count as "paired".
+
+## 2a. Priority and energy on the watch
 
 The Onewheel (ESC) link is what the watch is for. The beacon scan is strictly lower
-priority: while the watch is connected to the ESC as a central, the scan backs off (longer
-period) or pauses entirely; theme latency is never bought with a dropped telemetry packet.
-The 120 ms / 3 s scan is a starting point to be **measured** (`SCROLL_STRESS=1` + periodic
-ext-scan, watching "largest DMA block" in the heartbeat) before it is called final — the
-earlier screen freeze was internal-RAM starvation while the radio was up.
+priority: while the watch is connected to the ESC as a central, the scan backs off or pauses
+entirely; theme latency is never bought with a dropped telemetry packet.
+
+Where the radio time goes, and what this version does about it:
+
+| activity | before v3 | v3 |
+|---|---|---|
+| beacon scan, screen on | 120 ms / 2.56 s ≈ 4.7 % | unchanged (user's call: ≤ 3 s latency) |
+| beacon scan, request out | 120 ms / 640 ms ≈ 19 %, ≤ 10 s | unchanged; typically over in 1–2 s (echo ≤ 0.64 s, theme +0.4 s) |
+| retransmissions | — | ≤ 3 stop/start per gesture, milliseconds of radio |
+| beacon scan, screen off | none | none |
+| own advertisement, idle | 200 ms, connectable + scannable | **1 s**, connectable (ADV_IND) |
+| scan responses to the desktop's active scan | one per ~200 ms, forever, with the UUID | one per ~1 s, empty |
+| own advertisement, request out | 200 ms | **100 ms, ≤ 10 s** |
+| NVS writes | every applied beacon | after 10 s stable, only if different |
+| HMAC | — | one SHA-256 per *changed* theme (rule 1 of §1 runs first) |
+
+The 120 ms / 2.56 s figure is still to be **measured** (`SCROLL_STRESS=1` + periodic
+ext-scan, watching "largest DMA block" in the heartbeat) — the earlier screen freeze was
+internal-RAM starvation while the radio was up.
 
 ## 3. What stays on GATT: the pairing key, and the theme list
 
 Rare, large, or secret goes over a normal connection: the pairing key (§2b) and the theme
 list below. `…0004` is reserved by the watch project. Neither is needed for the loop above.
+The desktop connects **by address** (saved at pairing, refreshed from every accepted
+request); the watch's scan response is empty, so the service UUID is discovered after
+connecting, not from a scan.
 
-### 3a. The theme list (agreed 2026-08-26; both sides implemented — watch firmware
-github.com/ncr/onewheel `ce199f8` + `8b724c1`, verified from a Mac the same day with a
-Python mock of the daemon (`tools/omarchy-watch-daemon.py` there): pair → code → RESEND with
-the pending key → list pushed (22 themes, 1231 B) → swipe → pick → LIST refresh; the list is
-saved to `/sdcard/onewheel/themes.bin` and reloaded at boot)
+### 3a. The theme list
 
-Every installed theme, so the watch can show a tappable picker (tap = a SET request) and
-paint the picked theme before the desktop confirms it. The watch keeps it on its SD card
-(NVS fallback).
+Every installed theme, so the watch can show a picker and a prev | current | next switcher,
+paint the chosen theme before the desktop confirms it, and address it by slug crc in a SET.
+The watch keeps the list on its SD card (NVS fallback).
 
 ```
 CHARACTERISTIC  7a0e0006-0f0e-4d0c-9c0b-0a0908070605  "list"   read + write (with response,
                                                                 one frame per write)
 
 READ → status   [0x01 ver][count u8][crc16 le][flags u8]      5 bytes
-                crc16 = CRC-16/CCITT-FALSE of the stored list bytes (the SET slug crc)
+                crc16 = crc16 of the stored list bytes
                 flags bit0 = stored on SD, bit1 = a list is loaded
 
 WRITE frames    each ≤ MTU − 3 (≤ 509 B at the watch's preferred MTU 512)
@@ -179,24 +282,26 @@ WRITE frames    each ≤ MTU − 3 (≤ 509 B at the watch's preferred MTU 512)
                                                                  After any rejected frame, DATA
                                                                  keeps failing with 0x81 until a
                                                                  new BEGIN.
-  COMMIT  [0x03][mac 4 B]   mac = HMAC-SHA256(pairing key, list bytes)[0..4]. The watch checks
-                            crc + mac, saves, swaps the list in, and takes its own LIST request
-                            (if any) off the air — synchronously, before the ATT ack, so a
-                            READ right after the ack shows the new count/crc. Bad mac → ATT
-                            error 0x83, bad crc → 0x84, bytes that do not parse → 0x85; the
-                            list is discarded.
+  COMMIT  [0x03][mac 4 B]   mac = mac4(k, 0x03 ‖ total u16 le ‖ crc16 u16 le ‖ list bytes):
+                            bound to this transfer's header, not just its content. The watch
+                            checks crc + mac, saves, swaps the list in, and takes its own
+                            request (LIST or SET, if any) off the air — synchronously, before
+                            the ATT ack, so a READ right after the ack shows the new count/crc.
+                            Bad mac → ATT error 0x83, bad crc → 0x84, bytes that do not
+                            parse → 0x85; the list is discarded.
 
 LIST BYTES      [0x01 ver][count u8] then count × [len u8][theme packet v2, `len` bytes]
                 The v2 packet is exactly what the state beacon / characteristic …0002 carry:
                 [0x02] + [role R G B] colour records (every role the desktop maps: 1..14;
                 cursor (15) is derived by the watch, as for the beacon) + 0x40 name = the
                 theme SLUG (ASCII, what omarchy-theme-set takes) + 0x41 flags (bit0 light).
-                No 0x42/0x43 neighbour records. Entries in `omarchy-theme-list` order (= the
-                NEXT/PREV order). ~75 B per entry; the stock 19 themes ≈ 1.4 KB.
+                No 0x42 mac record. Entries in `omarchy-theme-list` order (= the switcher
+                order on the watch). ~75 B per entry; the stock 19 themes ≈ 1.4 KB.
                 Limits (THEMELIST_MAX / THEMELIST_MAX_BYTES on the watch): 64 entries,
                 8192 bytes; the desktop drops what does not fit, in list order, and logs it.
+                The desktop refuses to build a list in which two slugs share a crc16.
 
-REQUEST OP      0x06 LIST, arg 0 (the signed 10-byte request of §2).
+REQUEST OP      0x03 LIST, arg 0 (the signed 11-byte request of §2).
 ```
 
 When the desktop pushes:
@@ -207,46 +312,68 @@ When the desktop pushes:
 2. **On demand** — `themesync push-list` (through the daemon if it runs, else a one-shot
    connection with the key from `~/.config/themesync/key`); `--force` sends even when the
    crc matches; `--dry-run` prints the list and every frame without touching the radio.
-3. **When the watch asks** — a LIST request whose MAC verifies: the daemon connects to the
-   requesting address and pushes unconditionally, so the COMMIT that clears the request
-   always lands.
+3. **When the watch asks** — a LIST request that verifies: pushed unconditionally, so the
+   COMMIT that clears the request always lands.
+4. **When the watch asks for a theme the desktop does not have** — a SET whose crc matches
+   no installed slug (§2): pushed unconditionally, like 3.
+
+After every successful push the desktop bursts the state beacon for 10 s: the watch has just
+forgotten its applied theme (a list COMMIT clears `applied_crc` like a timeout does) and
+repaints from the first beacon it sees.
 
 The watch is local-first with the list: on a swipe or a pick it applies the entry's palette
-itself at once and *then* sends NEXT/PREV/SET; the state beacon that answers just confirms
-(same theme, new `seq` → the watch's runner stops). If the desktop's NEXT/PREV order ever
-differs from the pushed list (a theme installed or removed after the push), the beacon wins
-and the watch repaints to what the desktop actually set. Since `8b724c1` a theme written
-to `…0002` over GATT also completes the watch's pending request, so a desktop that cannot
-beacon (a Mac) closes the loop through the one-shot GATT push. On the desktop both orders come
-from the same function (`Omarchy::list_themes`, user + system dirs, sorted, de-duplicated),
-so they can only diverge when the installed set changes — `themesync push-list` or the
-watch's "refresh list" row (a LIST request) brings the watch back in step.
+itself at once and *then* sends SET with that entry's slug crc; the beacon that answers
+shows the same theme (§1 rule 4) and the watch's runner stops. A theme written to `…0002`
+over GATT also completes a pending request whose slug it matches, so a desktop that cannot
+beacon (a Mac) closes the loop through the one-shot GATT push. The list can only diverge
+from the desktop when the installed set changes after the push; then either the beacon shows
+a slug the watch does not know (the watch shows that theme alone, without neighbours, and
+may send LIST once) or a SET names a slug the desktop does not know (the desktop answers with
+the list). `themesync push-list` or the watch's "refresh list" row do the same by hand.
 
 Desktop details: one transfer at a time (a trigger during a transfer is dropped, the next
 one sends the current list anyway); find + connect + push is retried 3× except after an
 ATT error (a rejected frame will not pass on retry; a retry is a fresh BEGIN, never a
 resume); DATA frames are sized from the MTU BlueZ negotiated (it asks for 517 on connect,
-the watch prefers 512 since 2026-08-26 → 509-byte frames, 3–4 writes for 19 themes). After
-COMMIT the status is read back and must show this list's crc and count.
+the watch prefers 512 → 509-byte frames, 3–4 writes for 19 themes). After COMMIT the status
+is read back and must show this list's crc and count.
 
-Interop vector (key `00 01 … 0f`, one entry: bg 10 20 30, fg 40 50 60, name "nord", flags 0):
+## 4. Interop vectors (key `00 01 … 0f`)
 
 ```
-list    01 01 12 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00     (21 B)
-crc16   0xDB97
-BEGIN   01 01 15 00 97 db
-DATA    02 00 00 + the 21 list bytes
-COMMIT  03 35 e8 31 b9
+request  SET "tokyo-night" (crc 0xAAE5), ctr 1   54 03 01 00 01 e5 aa 3f 0e c9 9b
+request  RESEND, ctr 2                            54 03 02 00 02 00 00 0c c2 e4 fc
+request  LIST, ctr 3                              54 03 03 00 03 00 00 ea 01 ce c7
+
+beacon   theme: bg 10 20 30, fg 40 50 60, name "nord", flags 0
+         echo 0:  54 01 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00 43 02 00 00 | 42 04 4c dc bd 41
+         echo 1:  54 01 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00 43 02 01 00 | 42 04 ca a5 31 27
+         theme crc16 (the apply rule's key) = 0xD5E2 for both           30 bytes
+
+list     01 01 12 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00     (21 B)
+         crc16 0xDB97
+BEGIN    01 01 15 00 97 db
+DATA     02 00 00 + the 21 list bytes
+COMMIT   03 38 b7 43 d2
 ```
 
-## 4. Open questions for the watch side
+## 5. Settled, and still open
 
-1. Extended scanning (`ble_gap_ext_disc`) alongside advertising and, later, the Onewheel
-   central link — any objection to the 120 ms / 3 s window while the screen is on?
-2. (settled: the TX-power AD is dropped.)
-3. (settled: key characteristic `…0005`, write-only, NVS namespace `pair`.)
-4. (settled 2026-08-26, user's call: no time and no counter in any packet; a per-press
-   random nonce only.)
-5. UI (settled by the user 2026-08-26): a "Themes" screen showing prev | current | next
-   from the beacon's 0x42/0x43 records; swipe = PREV/NEXT. No TOGGLE. Tap = the §3 list
-   (pick = SET), with a "refresh list" row that sends LIST.
+Settled by the user:
+- 2026-08-26: no time in any packet (the watch RTC loses time on power-off). Two-way over
+  advertising, no GATT session in daily use. The watch's v2 TLV is the shared theme format.
+- 2026-08-27 (morning): the watch names the theme (SET by slug crc); no NEXT/PREV; the watch
+  shows prev | current | next from its own list; greenfield — wire bytes may be renumbered.
+- 2026-08-27 (v3): a counter is fine (it is not a clock and needs no sync beyond pairing);
+  keep the 2.56 s idle scan (≤ 3 s latency over battery); idle advertisement 1 s and
+  non-scannable; MAC the beacon now.
+
+Open, in the order they should be taken:
+1. **Pairing hardening**: accept the `…0005` write only within ~60 s of the user opening
+   "Pair" on the watch; then `BLE_GATT_CHR_F_WRITE_ENC` (LE link encryption) or an X25519
+   agreement with the two digits as a short authenticated string over the transcript;
+   the build-time default key behind a build flag, off by default.
+2. **Theme addressing** `arg = [list index u8][list crc8 u8]` (an ETag / If-Match): no crc
+   collisions, and a stale list is detected on every SET, including renames and additions.
+3. Measure: the beacon interval BlueZ actually programs (`btmon`), and the watch's scan duty
+   under the ESC link.

@@ -50,7 +50,7 @@ host/                    Rust crate `omarchy-themesync`, binary `themesync`
   src/beacon.rs            state beacon / request packets, HMAC, pairing key
   src/themelist.rs         the theme list pushed over GATT (list bytes, BEGIN/DATA/COMMIT frames, status)
   src/transport/ble.rs     GATT client (v2 / 13-byte packets on 7a0e0001; v1 on 7e450001)
-  src/transport/adv.rs     BlueZ advertising + passive scan (bluer)
+  src/transport/adv.rs     BlueZ advertising + request scan from D-Bus signals (bluer)
   src/transport/ipc.rs     hook → daemon Unix socket
   src/transport/sim.rs     simulated watch receiver
   src/daemon.rs            beacon + request scanner + socket for the hook (+ GATT fallback, list push); Linux only
@@ -91,9 +91,9 @@ themesync daemon                            # state beacon + request scanner (pr
 systemctl --user enable --now themesync     # the daemon as a user service (systemd/themesync.service); after code changes:
                                             #   cargo install --path host && systemctl --user restart themesync
 themesync pair                              # new key over GATT + a 2-digit code you confirm on the watch's Pairing screen
-themesync status                            # daemon state (seq, key, last request, last list push)
+themesync status                            # daemon state (key, counter, last request, last list push)
+themesync reset-counter                     # after reflashing the watch (or just `pair` again)
 themesync push-list [--force] [--dry-run]   # the installed themes to the watch over GATT (7a0e0006), for its picker
-themesync next | prev                       # desktop-side theme stepping (what the watch requests trigger)
 themesync sync --proto mini                 # the 13-byte core-four packet instead
 themesync scan / sync --proto v1 / encode / decode / demo   # Theme Protocol v1 tooling (no device speaks it)
 ```
@@ -105,21 +105,26 @@ append-only) and the legacy **13-byte** packet. `themesync sync` sends v2 with a
 this host maps (the watch derives `cursor`); the read-back is compared role by role.
 Verified 2026-08-26 on the device: 70 bytes out, "15 roles, all sent roles match".
 
-**Two-way, connection-less (`protocol/BEACON.md`).** `themesync daemon` broadcasts the
-current theme as an extended advertisement (manufacturer data `0xFFFF`: `'T' 0x01 seq host`
-+ the v2 packet + the previous/next themes as records `0x42`/`0x43`, so the watch can show
-"prev | current | next", + `0x44` = the nonce of the watch request this theme answers) and
-scans passively for the watch's requests (`'T' 0x02 nonce op arg mac`, HMAC-keyed;
-NEXT/PREV/SET → `omarchy-theme-set`, one at a time in order; RESEND → a burst; LIST → the
-theme list; TOGGLE was dropped — Omarchy themes have no light/dark pairs). No time and no counters in
-any packet. Pairing (§2b): `themesync pair` hands the daemon a *pending* key, writes
+**Two-way, connection-less (`protocol/BEACON.md`, v3 since 2026-08-27).** `themesync daemon`
+broadcasts the current theme as an extended advertisement (manufacturer data `0xFFFF`:
+`'T' 0x01` + the v2 packet + `0x42` = a 4-byte HMAC over everything before it; ~76 B, fixed
+80 ms, 30 ms burst for 10 s after a change) and scans for the watch's requests (`'T' 0x03
+ctr op arg mac`, 11 B, HMAC-keyed, a per-key monotonic counter instead of a nonce — the
+desktop accepts only `ctr > last accepted`, which covers repeats, BlueZ's cached copies,
+daemon restarts and replays in one rule). Ops: SET <slug crc> → `omarchy-theme-set`,
+newest wins; an unknown slug means the watch's list is stale and is answered with the list;
+RESEND → a burst; LIST → the theme list. There is no sequence number and no ack: the watch
+applies a beacon whose theme bytes differ from what it shows (after verifying the MAC), and
+a request is answered when the beacon shows the theme it asked for. No time in any packet.
+Pairing (§2b): `themesync pair` hands the daemon a *pending* key, writes
 `[0x01][code][key]` to the watch over GATT and prints the two-digit code; the watch shows a
 roller screen, and a request signed with the new key (the watch's RESEND after a correct
-code) makes it the active key — a wrong code changes nothing on either side. **Theme list
+code) makes it the active key and resets the counter — a wrong code changes nothing on
+either side. **Theme list
 (§3):** the installed themes as v2 packets (`[ver][count]` + `[len][packet]`*, slug as the
 name, `omarchy-theme-list` order) go to characteristic `…0006` in BEGIN/DATA/COMMIT frames
 sized to the negotiated MTU, the COMMIT keyed with the pairing key; the daemon pushes it
-right after a pairing completes, when the watch sends a LIST request (op `0x06`), and on
+right after a pairing completes, when the watch sends a LIST request (op `0x03`), and on
 `themesync push-list` (`--dry-run` prints the frames). The watch stores it on its SD card
 and shows it as a tappable picker (tap = SET). The firmware side (beacon receive, request sender, key characteristic
 `…0005`) is agreed but not built yet; until then the daemon also pushes every change over a
@@ -130,13 +135,13 @@ Firmware side of the v1 design: `watch/esp32-lvgl/INTEGRATION.md`.
 
 #### Status (2026-08-26)
 
-* Host: 42 unit tests (v1 protocol, v2 codec, beacon packets/MAC/ack, theme list + frames,
+* Host: 40 unit tests (v1 protocol, v2 codec, beacon packets/MAC, theme list + frames,
   mapping, resolver parity). Builds on Linux and macOS; the daemon (BlueZ over D-Bus) is
   compiled in on Linux only, the GATT commands (`sync --direct`, `push-list --direct`,
   `pair`) work on both.
 * Theme list push (2026-08-26): desktop side done (`themelist.rs`, `push-list`, the daemon
   triggers); the watch firmware (`github.com/ncr/onewheel` `ce199f8`, `8b724c1`: `…0006`,
-  op `0x06`, the SD-backed list, the picker UI) is flashed and the whole loop — pair, code,
+  op LIST, the SD-backed list, the picker UI) is flashed and the whole loop — pair, code,
   post-pairing list push (22 themes, 1231 B), swipe, pick, LIST refresh — is verified on the
   hardware from a Mac with a Python mock of the daemon; both sides agree on the interop
   vector in `protocol/BEACON.md` §3a. Not yet run end to end from the Linux box — the watch's NVS
@@ -148,14 +153,16 @@ Firmware side of the v1 design: `watch/esp32-lvgl/INTEGRATION.md`.
   `theme: set over BLE … name: '<x>'`, about 3 s after the desktop retint. Full v2 palette
   round-trips byte-exact; the daemon's beacon registers with BlueZ (extended advertising)
   and its socket serves `sync`/`status`.
-* Beacon → watch verified 2026-08-26 (`themesync daemon --no-gatt`, watch firmware with the
+* (History, v1 of the protocol — `seq`, nonces and acks are gone in v3; the independent
+  review that drove v3 is `docs/review-2026-08-27.md`.) Beacon → watch verified 2026-08-26 (`themesync daemon --no-gatt`, watch firmware with the
   ext-scan receive path, 120 ms window / 2.56 s): five pushes 30 s apart, watch log
   `beacon: seq 25 applied (69 B, -71 dBm)` … `seq 29`, four real recolours (gruvbox, nord,
   ethereal, gruvbox, ethereal), each seq applied exactly once although every seq is
   broadcast hundreds of times; ~35 KB internal RAM free throughout, no stall. A2DP music on
   the same desktop adapter (WH-CH720N) stayed connected through the whole run.
 * Watch → desktop verified the same day, whole loop without a GATT connection: the watch's
-  "Themes" screen (swipe = NEXT/PREV, tap = RESEND) puts the signed
+  "Themes" screen (then swipe = NEXT/PREV, tap = RESEND; since 2026-08-27 a swipe sends
+  SET with the neighbour's slug crc) puts the signed
   10-byte request on its advertisement; daemon log `28:84:…: Toggle nonce 0x24` →
   `Toggle -> omarchy-theme-set flexoki-light` → `beacon: seq 86, theme flexoki-light` →
   watch log `beacon: seq 86 applied` + `request cleared`. Fast gestures out-run
@@ -174,7 +181,7 @@ Firmware side of the v1 design: `watch/esp32-lvgl/INTEGRATION.md`.
   last ManufacturerData cached long after the device stopped advertising it and hands it
   back on every property change (RSSI ticks), so a request is deduplicated per address
   without expiry and whatever is cached at daemon start is marked as already seen — a 60 s
-  dedup window produced one phantom NEXT per minute.
+  dedup window produced one phantom request per minute.
 
 ### Other devices
 

@@ -14,7 +14,7 @@ file cited below. Also cross-checked with a local shallow clone.
 | Hooks in `~/.config/omarchy/hooks/theme-set.d/` | **Correct** (since v3.8.0; hooks since v3.1.0). A flat `~/.config/omarchy/hooks/theme-set` runs first. |
 | Current theme at `~/.config/omarchy/current/theme` | **Wrong for v4.** It is `~/.local/state/omarchy/current/theme/` — a real directory, atomically `mv`'d in — with the slug in `~/.local/state/omarchy/current/theme.name`. v3 used `~/.config/omarchy/current`. |
 | Stock themes under `~/.local/share/omarchy/themes` | **Both exist on v4.** `$OMARCHY_PATH/themes` = `/usr/share/omarchy/themes`, and on the user's box (checked 2026-08-26) `~/.local/share/omarchy/themes` lists the same 22 slugs. `OMARCHY_PATH` is *not* exported to non-login shells or the systemd user manager (`systemctl --user show-environment` has only `PATH` with `/usr/share/omarchy/bin` and `DESKTOP_SESSION=omarchy`), so `themesync` follows `$OMARCHY_PATH` when set, else the `~/.local/share` tree when it has `themes/`, else `/usr/share`. `~/.config/omarchy/themes/<slug>` holds user/installed themes and overlays the stock one. |
-| `omarchy-theme-next` | Does not exist. Only `omarchy-theme-bg-next`, `omarchy-theme-switcher`, `omarchy-theme-refresh`. `themesync next/prev` enumerate the theme dirs the way `omarchy-theme-list` does. |
+| `omarchy-theme-next` | Does not exist. Only `omarchy-theme-bg-next`, `omarchy-theme-switcher`, `omarchy-theme-refresh`. `Omarchy::list_themes` (the theme list the watch gets) enumerates the theme dirs the way `omarchy-theme-list` does. |
 
 ## The resolver (`bin/omarchy-theme-color`)
 

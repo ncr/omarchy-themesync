@@ -1,17 +1,18 @@
-//! `themesync daemon`: the connection-less bridge of `protocol/BEACON.md`.
+//! `themesync daemon`: the connection-less bridge of `protocol/BEACON.md` (v3).
 //!
-//! * Advertises the current Omarchy theme as the state beacon, forever (30 ms "burst" for
-//!   10 s after a change, then 100 ms).
-//! * Scans passively for the watch's requests (NEXT/PREV/SET/RESEND/LIST), checks their
-//!   MAC against the pairing key, and drives `omarchy-theme-set` — which fires the hook, which
-//!   comes back through the socket, which bumps the beacon. One loop for both directions.
+//! * Advertises the current Omarchy theme as the state beacon, signed with the pairing key,
+//!   forever (30 ms "burst" for 10 s after a change, then a fixed 80 ms).
+//! * Scans for the watch's requests (SET/RESEND/LIST), checks their MAC against the pairing
+//!   key and their counter against the last one accepted, and drives `omarchy-theme-set` —
+//!   which fires the hook, which comes back through the socket, which refreshes the beacon.
+//!   One loop for both directions.
 //! * Pushes the theme list over GATT (`protocol/BEACON.md` §3) when a pairing completes, when
-//!   the watch asks (LIST), and on `themesync push-list`.
+//!   the watch asks (LIST, or a SET naming a theme this desktop does not have), and on
+//!   `themesync push-list`.
 //! * Serves the socket the hook and `themesync sync` talk to.
 //! * Until the watch firmware receives beacons, also pushes each change over a one-shot
 //!   GATT connection (`--no-gatt` turns that off).
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
-use crate::beacon::{self, AckLog, Op, Request as BeaconRequest, Verified};
+use crate::beacon::{self, Op, Verified};
 use crate::omarchy::Omarchy;
 use crate::palette::map_source;
 use crate::protocol;
@@ -31,48 +32,37 @@ use crate::transport::ble::{self, BleOptions};
 use crate::transport::ipc::{socket_path, Reply, Request};
 
 const BURST: Duration = Duration::from_millis(30);
-const STEADY: Duration = Duration::from_millis(100);
+/// Fixed (min == max). With the controller's 0–10 ms advDelay the worst gap between two
+/// events is 90 ms, inside the watch's 120 ms scan window with margin (BEACON.md §1).
+const STEADY: Duration = Duration::from_millis(80);
 const BURST_FOR: Duration = Duration::from_secs(10);
 /// BlueZ silently drops advertisements when the adapter resets (suspend/resume, `bluetoothctl
 /// power off`); re-registering on a timer is the cheap insurance for a daemon that runs forever.
-const REPUBLISH_EVERY: Duration = Duration::from_secs(300);
+const REPUBLISH_EVERY: Duration = Duration::from_secs(60);
+
+type Key = [u8; beacon::KEY_LEN];
 
 fn log(msg: &str) {
     eprintln!("[themesync] {msg}");
 }
 
-/// The active Omarchy theme as the watch's v2 packet, plus the previous/next themes in
-/// `omarchy-theme-list` order (tags 0x42/0x43) so the watch can show where PREV/NEXT lead.
-fn describe(wire: &[u8]) -> String {
-    match protocol::decode_v2(wire) {
-        Ok(d) => format!(
-            "{} bytes; prev {}, next {}; ack {}",
-            wire.len(),
-            d.prev.map(|n| n.name).unwrap_or_else(|| "-".into()),
-            d.next.map(|n| n.name).unwrap_or_else(|| "-".into()),
-            match d.ack { Some(protocol::V2_ACK_NONE) | None => "none".to_string(), Some(n) => format!("nonce {n:#04x}") }
-        ),
-        Err(_) => format!("{} bytes", wire.len()),
-    }
-}
-
-/// `ack` is the `0x44` record: the nonce of the watch request this theme answers, or
-/// `V2_ACK_NONE` for a change the desktop made on its own.
-fn current_theme(ack: u8) -> Result<(String, Vec<u8>)> {
+/// The active Omarchy theme: its slug and the v2 packet (what GATT `…0002` takes and what
+/// the beacon carries).
+fn current_theme() -> Result<(String, Vec<u8>)> {
     let om = Omarchy::from_env()?;
     let src = om.load_current()?;
     let p = map_source(&src)?;
-    let mut wire = protocol::encode_v2(&p, false);
-    let cur = om.current_theme_name();
-    for (tag, step) in [(protocol::V2_TAG_PREV, -1), (protocol::V2_TAG_NEXT, 1)] {
-        let Some(slug) = om.neighbour_of(cur.as_deref(), step) else { continue };
-        match om.load_theme(&slug).and_then(|s| map_source(&s).map_err(Into::into)) {
-            Ok(np) => protocol::v2_append_neighbour(&mut wire, tag, &protocol::Neighbour::from_palette(&np)),
-            Err(e) => log(&format!("neighbour {slug}: {e:#}")),
-        }
+    Ok((p.name.clone(), protocol::encode_v2(&p, false)))
+}
+
+/// The state beacon for this theme and this echo (the last request counter accepted) —
+/// empty when there is no key yet, because a beacon without a MAC is one no paired watch
+/// would apply.
+fn sign(key: Option<&Key>, v2: &[u8], echo: u16) -> Vec<u8> {
+    match key {
+        Some(k) if !v2.is_empty() => beacon::encode_state(k, v2, echo),
+        _ => Vec::new(),
     }
-    protocol::v2_append_ack(&mut wire, ack);
-    Ok((p.name.clone(), wire))
 }
 
 struct Ipc {
@@ -120,33 +110,26 @@ async fn serve_socket(tx: mpsc::Sender<Ipc>) -> Result<()> {
     }
 }
 
+/// A SET the scanner accepted: the watch's counter (for the log) and the slug it asked for.
+type SetJob = (u16, String);
 
-/// The theme a watch request asks for, resolved against the *current* desktop state (NEXT
-/// after NEXT steps twice, so requests must run one after another, in order).
-fn target_of(om: &Omarchy, req: BeaconRequest) -> Option<String> {
-    match req.op {
-        Op::Next => om.neighbour_theme(1),
-        Op::Prev => om.neighbour_theme(-1),
-        Op::Set => om.list_themes().into_iter().find(|s| beacon::slug_id(s) == req.arg),
-        Op::Resend | Op::List => None, // handled in the loop, no theme change
-    }
-}
-
-/// One thread runs the watch's theme requests strictly in order (`omarchy-theme-set` takes
-/// seconds and two at once would race each other). Each target is noted in the ack log
-/// before the change so the hook's `sync` can acknowledge it in the beacon.
-fn spawn_actor(om: Omarchy, acks: Arc<Mutex<AckLog>>) -> std::sync::mpsc::Sender<BeaconRequest> {
-    let (tx, rx) = std::sync::mpsc::channel::<BeaconRequest>();
+/// One thread runs `omarchy-theme-set` for the watch (it takes seconds; two at once would
+/// race each other). SET is absolute, so nothing queues: while one runs, only the newest
+/// SET received is kept — the ones it replaced are never applied (the watch has already
+/// moved on). The answer is the beacon itself: once the hook reports the new theme, the
+/// beacon shows the slug the watch asked for.
+fn spawn_actor(om: Omarchy) -> std::sync::mpsc::Sender<SetJob> {
+    let (tx, rx) = std::sync::mpsc::channel::<SetJob>();
     std::thread::spawn(move || {
-        for req in rx {
-            let Some(name) = target_of(&om, req) else {
-                log(&format!("{:?} (arg {:#06x}): no matching theme", req.op, req.arg));
-                continue;
-            };
-            acks.lock().unwrap().note(req.nonce, &name);
-            log(&format!("{:?} nonce {:#04x} -> omarchy-theme-set {name}", req.op, req.nonce));
+        while let Ok(mut job) = rx.recv() {
+            while let Ok(newer) = rx.try_recv() {
+                log(&format!("SET #{} ({}) superseded by #{}", job.0, job.1, newer.0));
+                job = newer;
+            }
+            let (ctr, name) = job;
+            log(&format!("SET #{ctr} -> omarchy-theme-set {name}"));
             if let Err(e) = om.set_theme(&name) {
-                log(&format!("{:?} failed: {e:#}", req.op));
+                log(&format!("SET {name} failed: {e:#}"));
             }
         }
     });
@@ -154,25 +137,25 @@ fn spawn_actor(om: Omarchy, acks: Arc<Mutex<AckLog>>) -> std::sync::mpsc::Sender
 }
 
 /// One-shot GATT push of the current theme (the pre-beacon path), detached.
-fn gatt_push(opts: BleOptions, wire: Vec<u8>) {
+fn gatt_push(opts: BleOptions, v2: Vec<u8>) {
     tokio::spawn(async move {
         let r: Result<()> = async {
             let adapter = ble::adapter().await?;
             let mut delay = Duration::from_millis(500);
             let mut peripheral = None;
             for _ in 0..3 {
-                match ble::discover_service(&adapter, &opts, ble::MINI_SERVICE_UUID).await {
+                match ble::find_watch(&adapter, &opts, beacon::load_watch_addr().as_deref()).await {
                     Ok(p) => { peripheral = Some(p); break; }
                     Err(e) => { log(&format!("gatt: {e:#}; retrying")); tokio::time::sleep(delay).await; delay *= 2; }
                 }
             }
             let Some(p) = peripheral else { anyhow::bail!("watch not found for the GATT push") };
-            let back = ble::send_colors(&p, &wire, None).await;
+            let back = ble::send_colors(&p, &v2, None).await;
             let _ = btleplug::api::Peripheral::disconnect(&p).await;
             let back = back?;
             match protocol::decode_v2(&back) {
                 Ok(d) => log(&format!("gatt: watch applied {}", d.summary())),
-                Err(e) => log(&format!("gatt: wrote {} bytes, read back {} bytes ({e})", wire.len(), back.len())),
+                Err(e) => log(&format!("gatt: wrote {} bytes, read back {} bytes ({e})", v2.len(), back.len())),
             }
             Ok(())
         }
@@ -186,11 +169,14 @@ fn gatt_push(opts: BleOptions, wire: Vec<u8>) {
 /// Everything a theme-list push needs, so the detached task owns its data.
 struct ListPushJob {
     opts: BleOptions,
-    key: [u8; beacon::KEY_LEN],
-    /// The watch's address from the request just scanned; `None` = any watch with the service.
+    key: Key,
+    /// The watch's address; `None` = find it by name.
     addr: Option<String>,
     force: bool,
     reason: &'static str,
+    /// Told when the push succeeded, so the loop can burst the beacon: the watch forgets its
+    /// applied theme on a list COMMIT and repaints from the first beacon it sees.
+    after: mpsc::Sender<&'static str>,
 }
 
 /// Build the theme list and push it over GATT (protocol/BEACON.md §3), detached. One push at
@@ -211,6 +197,9 @@ fn list_push(job: ListPushJob, gate: Arc<Semaphore>, state: Arc<Mutex<String>>, 
             let built = tokio::task::spawn_blocking(|| Omarchy::from_env().map(|om| themelist::build(&om))).await??;
             for (slug, why) in &built.skipped {
                 log(&format!("list: skipping {slug}: {why}"));
+            }
+            if let Some((a, b)) = &built.collision {
+                anyhow::bail!("themes {a:?} and {b:?} share slug crc {:#06x}: a SET could not tell them apart; rename one", beacon::slug_id(a));
             }
             if built.slugs.is_empty() {
                 anyhow::bail!("no Omarchy themes found");
@@ -248,6 +237,7 @@ fn list_push(job: ListPushJob, gate: Arc<Semaphore>, state: Arc<Mutex<String>>, 
         let (reply, text) = match r {
             Ok(s) => {
                 log(&format!("list push ({}): {s}", job.reason));
+                let _ = job.after.try_send(job.reason);
                 (Reply { watch: job.addr.clone(), ..Reply::ok(s.clone()) }, s)
             }
             Err(e) => {
@@ -268,18 +258,33 @@ pub struct Options {
     pub gatt: bool,
 }
 
+/// Register the beacon; on failure (BlueZ mid-reset, "maximum advertisements reached" from
+/// the drop/register race) try once more after 200 ms rather than staying dark until the
+/// next republish tick.
+async fn publish(radio: &mut Radio, wire: &[u8], burst: bool) {
+    if wire.is_empty() {
+        return;
+    }
+    let interval = if burst { BURST } else { STEADY };
+    if let Err(e) = radio.set_beacon(wire.to_vec(), interval).await {
+        log(&format!("beacon: {e:#}; retrying in 200 ms"));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Err(e) = radio.set_beacon(wire.to_vec(), interval).await {
+            log(&format!("beacon: {e:#}"));
+        }
+    }
+}
+
 pub async fn run(opts: Options) -> Result<()> {
     let mut radio = Radio::open().await?;
     log(&format!("adapter {}", radio.adapter_name()));
-    let mut key = beacon::load_key();
+    let mut key: Option<Key> = beacon::load_key();
     match &key {
         Some(_) => log(&format!("pairing key loaded from {}", beacon::key_path().display())),
-        None => log("no pairing key (run `themesync pair`): watch requests will be ignored"),
+        None => log("no pairing key (run `themesync pair`): no beacon, watch requests ignored"),
     }
-    let host = beacon::host_id();
     let om = Omarchy::from_env().ok();
-    let acks: Arc<Mutex<AckLog>> = Arc::new(Mutex::new(AckLog::default()));
-    let actor = om.clone().map(|om| spawn_actor(om, acks.clone()));
+    let actor = om.clone().map(spawn_actor);
 
     let (tx, mut rx) = mpsc::channel::<Ipc>(16);
     tokio::spawn(async move {
@@ -290,13 +295,13 @@ pub async fn run(opts: Options) -> Result<()> {
 
     // Requests from the air, via a second bluer session (the scan borrows the adapter for
     // as long as it runs).
-    let (rtx, mut rrx) = mpsc::channel::<(Address, Vec<u8>, bool)>(32);
+    let (rtx, mut rrx) = mpsc::channel::<(Address, Vec<u8>)>(32);
     tokio::spawn(async move {
         loop {
             match Radio::open().await {
                 Ok(r) => {
                     let rtx = rtx.clone();
-                    if let Err(e) = r.scan_ours(|addr, data, cached| { let _ = rtx.try_send((addr, data.to_vec(), cached)); }).await {
+                    if let Err(e) = r.scan_ours(|addr, data| { let _ = rtx.try_send((addr, data.to_vec())); }).await {
                         log(&format!("scan stopped: {e:#}; restarting in 3 s"));
                     }
                 }
@@ -307,49 +312,44 @@ pub async fn run(opts: Options) -> Result<()> {
     });
 
     // ---- state ----
-    let mut seq: u8 = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) & 0xff) as u8;
-    let (mut theme_name, mut theme_wire) = match current_theme(protocol::V2_ACK_NONE) {
+    let (mut theme_name, mut theme_v2) = match current_theme() {
         Ok(t) => t,
         Err(e) => {
             log(&format!("no active Omarchy theme yet ({e:#}); beacon idle until the first sync"));
             (String::new(), Vec::new())
         }
     };
-    // The last request accepted (or found cached) per address: (nonce, op, arg). Never
-    // expires — BlueZ re-delivers a device's last ManufacturerData on every property change
-    // for as long as it stays cached, which is far longer than the press was on the air.
-    let mut seen: HashMap<String, (u8, u8, u16)> = HashMap::new();
     let mut burst_until: Option<Instant> = None;
     let mut last_request: Option<String> = None;
+    // The request counter (BEACON.md §2): accept only ctr > last accepted under the active
+    // key. This one rule covers repeats of the same press, BlueZ's cached copy of an old
+    // request re-delivered on any property change, a request still on the air across a
+    // daemon restart, and replays.
+    let mut ctr_last: u16 = beacon::load_ctr();
+    let mut theme_wire = sign(key.as_ref(), &theme_v2, ctr_last);
+    let mut ctr_rejected: u32 = 0;
+    let mut last_rejected: Option<u16> = None;
+    let mut last_bad: Option<Vec<u8>> = None;
     // A pending key never expires on its own: the watch may have committed it already (the
     // user entered the code) while its confirmation was lost on the air; the next request it
     // signs with that key completes the pairing, however late.
-    let mut pending: Option<[u8; beacon::KEY_LEN]> = beacon::load_pending_key();
+    let mut pending: Option<Key> = beacon::load_pending_key();
     if pending.is_some() {
         log(&format!("pairing: pending key restored from {}", beacon::pending_key_path().display()));
     }
     let mut pair_state = String::from(if pending.is_some() { "pairing pending" } else if key.is_some() { "paired" } else { "no key" });
-    // The theme list push (protocol/BEACON.md §3): the watch's address from its last verified
-    // request, the one-at-a-time gate, and the last outcome for `status`.
-    let mut watch_addr: Option<String> = None;
+    // The theme list push (protocol/BEACON.md §3): the watch's address (saved at pairing,
+    // refreshed from every accepted request), the one-at-a-time gate, the last outcome.
+    let mut watch_addr: Option<String> = beacon::load_watch_addr();
     let list_gate = Arc::new(Semaphore::new(1));
     let list_state = Arc::new(Mutex::new(String::from("never")));
+    let (pushed_tx, mut pushed_rx) = mpsc::channel::<&'static str>(4);
+    let list_job = |key: Key, addr: Option<String>, force: bool, reason: &'static str| ListPushJob { opts: opts.ble.clone(), key, addr, force, reason, after: pushed_tx.clone() };
 
-    async fn publish(radio: &mut Radio, seq: u8, host: u8, wire: &[u8], burst: bool) {
-        if wire.is_empty() {
-            return;
-        }
-        let data = beacon::encode_state(seq, host, wire);
-        match radio.set_beacon(data, if burst { BURST } else { STEADY }).await {
-            Ok(()) => {}
-            Err(e) => log(&format!("beacon: {e:#}")),
-        }
-    }
-
-    publish(&mut radio, seq, host, &theme_wire, true).await;
+    publish(&mut radio, &theme_wire, true).await;
     if !theme_wire.is_empty() {
         burst_until = Some(Instant::now() + BURST_FOR);
-        log(&format!("beacon: seq {seq}, theme {theme_name} ({})", describe(&theme_wire)));
+        log(&format!("beacon: theme {theme_name} ({} bytes)", theme_wire.len()));
     }
 
     let mut republish = tokio::time::interval(REPUBLISH_EVERY);
@@ -364,13 +364,13 @@ pub async fn run(opts: Options) -> Result<()> {
         tokio::select! {
             _ = republish.tick() => {
                 if burst_until.is_none() {
-                    publish(&mut radio, seq, host, &theme_wire, false).await;
+                    publish(&mut radio, &theme_wire, false).await;
                 }
             }
             Some(ipc) = rx.recv() => {
                 if let Request::PushList { force } = ipc.req {
                     match key {
-                        Some(k) => list_push(ListPushJob { opts: opts.ble.clone(), key: k, addr: watch_addr.clone(), force, reason: "push-list" }, list_gate.clone(), list_state.clone(), Some(ipc.reply)),
+                        Some(k) => list_push(list_job(k, watch_addr.clone(), force, "push-list"), list_gate.clone(), list_state.clone(), Some(ipc.reply)),
                         None => { let _ = ipc.reply.send(Reply::err("no pairing key: run `themesync pair` first (the list's COMMIT is keyed)")); }
                     }
                     continue;
@@ -380,11 +380,28 @@ pub async fn run(opts: Options) -> Result<()> {
                     Request::Status => Reply {
                         theme: Some(theme_name.clone()),
                         connected: Some(true),
-                        watch: Some(format!("beacon seq {seq}, host {host:#04x}, key {}, last request {}, list push {}", if key.is_some() { "loaded" } else { "missing" }, last_request.as_deref().unwrap_or("none"), list_state.lock().unwrap())),
+                        watch: Some(format!(
+                            "beacon {}, key {}, counter last {ctr_last} rejected {ctr_rejected}, watch {}, last request {}, list push {}",
+                            if theme_wire.is_empty() { "idle" } else { "on" },
+                            if key.is_some() { "loaded" } else { "missing" },
+                            watch_addr.as_deref().unwrap_or("unknown"),
+                            last_request.as_deref().unwrap_or("none"),
+                            list_state.lock().unwrap()
+                        )),
                         ..Reply::ok(pair_state.clone())
                     },
                     Request::PushList { .. } => unreachable!("handled above"),
-                    Request::PairPending { key_hex } => match protocol::from_hex(&key_hex).and_then(|v| <[u8; beacon::KEY_LEN]>::try_from(v).ok()) {
+                    Request::ResetCounter => {
+                        ctr_last = 0;
+                        last_rejected = None;
+                        theme_wire = sign(key.as_ref(), &theme_v2, ctr_last);
+                        publish(&mut radio, &theme_wire, burst_until.is_some()).await;
+                        match beacon::save_ctr(0) {
+                            Ok(()) => { log("counter reset to 0 by request"); Reply::ok("counter reset; the watch's next request (any counter > 0) will be accepted") }
+                            Err(e) => Reply::err(format!("could not write {}: {e}", beacon::ctr_path().display())),
+                        }
+                    }
+                    Request::PairPending { key_hex } => match protocol::from_hex(&key_hex).and_then(|v| Key::try_from(v).ok()) {
                         Some(k) => {
                             pending = Some(k);
                             if let Err(e) = beacon::save_pending_key(&k) {
@@ -396,33 +413,28 @@ pub async fn run(opts: Options) -> Result<()> {
                         }
                         None => Reply::err("key_hex must be 32 hex digits"),
                     },
-                    Request::Sync => {
-                        // Which watch request (if any) this change answers: the ack log is
-                        // keyed by the slug the request targeted.
-                        let ack = Omarchy::from_env().ok().and_then(|o| o.current_theme_name()).map(|slug| acks.lock().unwrap().take(&slug)).unwrap_or(protocol::V2_ACK_NONE);
-                        match current_theme(ack) {
-                        Ok((name, wire)) => {
+                    Request::Sync => match current_theme() {
+                        Ok((name, v2)) => {
                             theme_name = name.clone();
-                            theme_wire = wire.clone();
-                            seq = seq.wrapping_add(1);
-                            publish(&mut radio, seq, host, &theme_wire, true).await;
+                            theme_v2 = v2.clone();
+                            theme_wire = sign(key.as_ref(), &theme_v2, ctr_last);
+                            publish(&mut radio, &theme_wire, true).await;
                             burst_until = Some(Instant::now() + BURST_FOR);
-                            log(&format!("beacon: seq {seq}, theme {name} ({})", describe(&theme_wire)));
-                            if opts.gatt { gatt_push(opts.ble.clone(), wire); }
+                            log(&format!("beacon: theme {name} ({} bytes{})", theme_wire.len(), if key.is_none() { ", not sent: no key" } else { "" }));
+                            if opts.gatt { gatt_push(opts.ble.clone(), v2); }
                             Reply { theme: Some(name), connected: Some(true), watch: Some("beacon".into()), ..Reply::ok("sent") }
                         }
                         Err(e) => Reply::err(format!("{e:#}")),
-                        }
-                    }
+                    },
                     Request::Push { packet_hex } => match protocol::from_hex(&packet_hex) {
-                        Some(wire) => {
-                            theme_name = protocol::decode_v2(&wire).ok().and_then(|d| d.name).unwrap_or_default();
-                            theme_wire = wire.clone();
-                            seq = seq.wrapping_add(1);
-                            publish(&mut radio, seq, host, &theme_wire, true).await;
+                        Some(v2) => {
+                            theme_name = protocol::decode_v2(&v2).ok().and_then(|d| d.name).unwrap_or_default();
+                            theme_v2 = v2.clone();
+                            theme_wire = sign(key.as_ref(), &theme_v2, ctr_last);
+                            publish(&mut radio, &theme_wire, true).await;
                             burst_until = Some(Instant::now() + BURST_FOR);
-                            log(&format!("beacon: seq {seq}, pushed packet ({} bytes)", wire.len()));
-                            if opts.gatt { gatt_push(opts.ble.clone(), wire); }
+                            log(&format!("beacon: pushed packet ({} bytes)", theme_wire.len()));
+                            if opts.gatt { gatt_push(opts.ble.clone(), v2); }
                             Reply { connected: Some(true), watch: Some("beacon".into()), ..Reply::ok("sent") }
                         }
                         None => Reply::err("packet_hex is not hex"),
@@ -430,20 +442,17 @@ pub async fn run(opts: Options) -> Result<()> {
                 };
                 let _ = ipc.reply.send(reply);
             }
-            Some((addr, data, cached)) = rrx.recv() => {
+            Some((addr, data)) = rrx.recv() => {
                 if data.get(1) != Some(&beacon::KIND_REQUEST) { continue; }
-                if cached {
-                    // history from BlueZ's cache: remember it so it is never acted on
-                    if data.len() == beacon::REQUEST_LEN {
-                        seen.insert(addr.to_string(), (data[2], data[3], u16::from_le_bytes([data[4], data[5]])));
-                        log(&format!("{addr}: cached request (nonce {:#04x}) marked as already seen", data[2]));
-                    }
-                    continue;
-                }
                 if key.is_none() && pending.is_none() { continue; }
                 match beacon::decode_request_with(key.as_ref(), pending.as_ref(), &data) {
-                    Err(beacon::RequestError::BadMac) => log(&format!("{addr}: request with a bad MAC ignored")),
-                    Err(e) => log(&format!("{addr}: {e}")),
+                    Err(e) => {
+                        // once per distinct packet: BlueZ re-delivers the same bytes on every RSSI tick
+                        if last_bad.as_deref() != Some(&data[..]) {
+                            log(&format!("{addr}: request ignored: {e}"));
+                            last_bad = Some(data.clone());
+                        }
+                    }
                     Ok((req, Verified::Pending)) => {
                         let k = pending.take().unwrap();
                         beacon::clear_pending_key();
@@ -452,47 +461,88 @@ pub async fn run(opts: Options) -> Result<()> {
                             Err(e) => log(&format!("pairing: confirmed by {addr} but saving the key failed: {e}")),
                         }
                         key = Some(k);
-                        seen.insert(addr.to_string(), (req.nonce, req.op.code(), req.arg));
+                        ctr_last = req.ctr;
+                        last_rejected = None;
+                        if let Err(e) = beacon::save_ctr(ctr_last) { log(&format!("could not write {}: {e}", beacon::ctr_path().display())); }
+                        watch_addr = Some(addr.to_string());
+                        if let Err(e) = beacon::save_watch_addr(&addr.to_string()) { log(&format!("could not write {}: {e}", beacon::watch_path().display())); }
                         pair_state = format!("paired with {addr}");
-                        last_request = Some(format!("{:?} (nonce {:#04x}) from {addr} [pairing confirmation]", req.op, req.nonce));
-                        publish(&mut radio, seq, host, &theme_wire, true).await;
+                        last_request = Some(format!("{:?} #{} from {addr} [pairing confirmation]", req.op, req.ctr));
+                        // The beacon is signed with the new key from now on.
+                        if let Ok((name, v2)) = current_theme() {
+                            theme_name = name; theme_v2 = v2;
+                        }
+                        theme_wire = sign(key.as_ref(), &theme_v2, ctr_last);
+                        publish(&mut radio, &theme_wire, true).await;
                         burst_until = Some(Instant::now() + BURST_FOR);
                         // "The list arrives with pairing": push it now, over a connection to that watch.
-                        watch_addr = Some(addr.to_string());
-                        list_push(ListPushJob { opts: opts.ble.clone(), key: k, addr: watch_addr.clone(), force: false, reason: "pairing" }, list_gate.clone(), list_state.clone(), None);
+                        list_push(list_job(k, watch_addr.clone(), false, "pairing"), list_gate.clone(), list_state.clone(), None);
                     }
                     Ok((req, Verified::Active)) => {
-                        let a = addr.to_string();
-                        let k = (req.nonce, req.op.code(), req.arg);
-                        if seen.get(&a) == Some(&k) {
-                            continue; // the same press: still on the air, or BlueZ's cache of it
-                        }
-                        seen.insert(a.clone(), k);
-                        watch_addr = Some(a.clone());
-                        last_request = Some(format!("{:?} (nonce {:#04x}) from {a}", req.op, req.nonce));
-                        log(&format!("{a}: {:?} nonce {:#04x}", req.op, req.nonce));
-                        if req.op == Op::Resend {
-                            publish(&mut radio, seq, host, &theme_wire, true).await;
-                            burst_until = Some(Instant::now() + BURST_FOR);
+                        if req.ctr <= ctr_last {
+                            if last_rejected != Some(req.ctr) {
+                                ctr_rejected += 1;
+                                last_rejected = Some(req.ctr);
+                                if req.ctr < ctr_last.saturating_sub(100) {
+                                    log(&format!("{addr}: {:?} #{} rejected: last accepted is #{ctr_last} — a reflashed watch counts from 1 again; run `themesync pair` (resets both sides) or `themesync reset-counter`", req.op, req.ctr));
+                                } else {
+                                    log(&format!("{addr}: {:?} #{} rejected: already seen (last accepted #{ctr_last})", req.op, req.ctr));
+                                }
+                            }
                             continue;
+                        }
+                        ctr_last = req.ctr;
+                        if let Err(e) = beacon::save_ctr(ctr_last) { log(&format!("could not write {}: {e}", beacon::ctr_path().display())); }
+                        // Echo first (BEACON.md §2): the watch learns its request arrived
+                        // within one scan window and stops retransmitting, before
+                        // omarchy-theme-set even starts.
+                        theme_wire = sign(key.as_ref(), &theme_v2, ctr_last);
+                        publish(&mut radio, &theme_wire, true).await;
+                        burst_until = Some(Instant::now() + BURST_FOR);
+                        let a = addr.to_string();
+                        if watch_addr.as_deref() != Some(&a) {
+                            watch_addr = Some(a.clone());
+                            if let Err(e) = beacon::save_watch_addr(&a) { log(&format!("could not write {}: {e}", beacon::watch_path().display())); }
+                        }
+                        last_request = Some(format!("{:?} #{} from {a}", req.op, req.ctr));
+                        log(&format!("{a}: {:?} #{}", req.op, req.ctr));
+                        let k = key.expect("Verified::Active implies an active key");
+                        if req.op == Op::Resend {
+                            continue; // the echo burst above is the answer
                         }
                         if req.op == Op::List {
                             // The watch asked for a refresh: always send (its request stays on the
-                            // air until our COMMIT lands), signed with the key that verified it.
-                            let key = key.expect("Verified::Active implies an active key");
-                            list_push(ListPushJob { opts: opts.ble.clone(), key, addr: watch_addr.clone(), force: true, reason: "request" }, list_gate.clone(), list_state.clone(), None);
+                            // air until our COMMIT lands).
+                            list_push(list_job(k, watch_addr.clone(), true, "request"), list_gate.clone(), list_state.clone(), None);
                             continue;
                         }
-                        match &actor {
-                            Some(tx) => { let _ = tx.send(req); }
-                            None => log("no Omarchy install found: request dropped"),
+                        // SET: the slug crc against the installed themes. No match = the
+                        // watch's list is stale (a theme removed since the push): answer
+                        // with the current list, exactly like LIST (BEACON.md §2).
+                        let (Some(om), Some(tx)) = (&om, &actor) else {
+                            log("no Omarchy install found: request dropped");
+                            continue;
+                        };
+                        match om.list_themes().into_iter().find(|s| beacon::slug_id(s) == req.arg) {
+                            Some(slug) => { let _ = tx.send((req.ctr, slug)); }
+                            None => {
+                                log(&format!("{a}: SET {:#06x} matches no installed theme; pushing the list", req.arg));
+                                list_push(list_job(k, watch_addr.clone(), true, "unknown theme"), list_gate.clone(), list_state.clone(), None);
+                            }
                         }
                     }
                 }
             }
+            Some(reason) = pushed_rx.recv() => {
+                // The watch just took a new list and forgot its applied theme: burst so its
+                // next scan window repaints it from the current beacon.
+                log(&format!("beacon: burst after the list push ({reason})"));
+                publish(&mut radio, &theme_wire, true).await;
+                burst_until = Some(Instant::now() + BURST_FOR);
+            }
             _ = relax => {
                 burst_until = None;
-                publish(&mut radio, seq, host, &theme_wire, false).await;
+                publish(&mut radio, &theme_wire, false).await;
             }
         }
     }

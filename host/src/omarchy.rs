@@ -122,22 +122,6 @@ impl Omarchy {
         }
     }
 
-    /// Pick the theme `steps` positions away from the current one (wrapping).
-    pub fn neighbour_theme(&self, steps: i32) -> Option<String> {
-        self.neighbour_of(self.current_theme_name().as_deref(), steps)
-    }
-
-    /// Same, relative to an explicit slug (`None` = the first theme).
-    pub fn neighbour_of(&self, slug: Option<&str>, steps: i32) -> Option<String> {
-        let themes = self.list_themes();
-        if themes.is_empty() {
-            return None;
-        }
-        let idx = slug.and_then(|c| themes.iter().position(|t| t == c)).unwrap_or(0) as i32;
-        let n = themes.len() as i32;
-        Some(themes[(((idx + steps) % n) + n) as usize % themes.len()].clone())
-    }
-
     /// Resolve an installed theme by slug without activating it.
     pub fn load_theme(&self, slug: &str) -> Result<SourcePalette> {
         let mut p = load_file(&self.theme_dir(slug).join("colors.toml"))?;

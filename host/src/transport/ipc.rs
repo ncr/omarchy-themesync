@@ -29,6 +29,9 @@ pub enum Request {
         #[serde(default)]
         force: bool,
     },
+    /// `themesync reset-counter`: forget the last accepted request counter (BEACON.md §2),
+    /// for a watch that was reflashed and starts counting from 1 again.
+    ResetCounter,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

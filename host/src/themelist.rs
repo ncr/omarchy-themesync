@@ -5,11 +5,11 @@
 //!
 //! ```text
 //! LIST BYTES   [0x01 ver][count u8] then count × [len u8][v2 packet: [2] roles… 0x40 slug 0x41 flags]
-//!              omarchy-theme-list order (= NEXT/PREV order); no 0x42/0x43 neighbour records.
+//!              omarchy-theme-list order (= the switcher order on the watch); no 0x42 mac record.
 //! READ status  [0x01 ver][count][crc16 le][flags]   5 bytes; flags bit0 stored on SD, bit1 a list is loaded
 //! WRITE frames BEGIN  [0x01][count][total u16 le][crc16 u16 le]
 //!              DATA   [0x02][offset u16 le][bytes…]     strictly sequential
-//!              COMMIT [0x03][mac 4 B]                   mac = HMAC-SHA256(pairing key, list bytes)[0..4]
+//!              COMMIT [0x03][mac 4 B]                   mac = HMAC(pairing key, 03 ‖ total ‖ crc16 ‖ list bytes)[0..4]
 //! ```
 //!
 //! crc16 is CRC-16/CCITT-FALSE ([`crc16`]), the one the SET request already uses.
@@ -127,9 +127,15 @@ pub fn decode_list(b: &[u8]) -> Result<Vec<Vec<u8>>, ListError> {
     Ok(out)
 }
 
-/// The COMMIT MAC: first 4 bytes of HMAC-SHA256(pairing key, list bytes).
+/// The COMMIT MAC: `mac4(key, 0x03 ‖ total u16 le ‖ crc16 u16 le ‖ list bytes)` — bound to
+/// this transfer's header, not just its content (BEACON.md §3a).
 pub fn list_mac(key: &[u8], list: &[u8]) -> [u8; MAC_LEN] {
-    mac4(key, list)
+    let mut m = Vec::with_capacity(5 + list.len());
+    m.push(FRAME_COMMIT);
+    m.extend_from_slice(&(list.len() as u16).to_le_bytes());
+    m.extend_from_slice(&crc16(list).to_le_bytes());
+    m.extend_from_slice(list);
+    mac4(key, &m)
 }
 
 /// Clamp a DATA payload size to what the protocol allows: `mtu - 3` capped at [`MAX_FRAME`].
@@ -218,6 +224,9 @@ pub struct Built {
     pub slugs: Vec<String>,
     /// Themes left out (unresolvable, or beyond the watch's limits) with the reason.
     pub skipped: Vec<(String, String)>,
+    /// Two slugs with the same crc16: the list must not be pushed (a SET could not tell
+    /// them apart). BEACON.md §3a.
+    pub collision: Option<(String, String)>,
 }
 
 impl Built {
@@ -226,13 +235,12 @@ impl Built {
     }
 }
 
-/// Resolve every installed theme to its v2 packet (all roles, slug as the name, no
-/// neighbours), in `omarchy-theme-list` order. Themes that do not resolve are skipped, and
-/// the list is cut at the watch's limits rather than refused.
+/// Resolve every installed theme to its v2 packet (all roles, slug as the name, no mac
+/// record), in `omarchy-theme-list` order. Themes that do not resolve are skipped, and the
+/// list is cut at the watch's limits rather than refused.
 ///
-/// The order must stay the one `Omarchy::neighbour_of` steps through (both call
-/// `list_themes`): the watch applies a list entry locally before its NEXT/PREV lands here,
-/// and the beacon only confirms.
+/// The watch steps through this list itself (prev | current | next), applies an entry
+/// locally, and names it in a SET by its slug crc; the beacon only confirms.
 pub fn build(om: &Omarchy) -> Built {
     let mut packets: Vec<Vec<u8>> = Vec::new();
     let mut built = Built::default();
@@ -261,6 +269,12 @@ pub fn build(om: &Omarchy) -> Built {
         packets.push(packet);
     }
     built.bytes = encode_list(&packets).expect("limits enforced above");
+    for (i, a) in built.slugs.iter().enumerate() {
+        if let Some(b) = built.slugs[i + 1..].iter().find(|b| crate::beacon::slug_id(a) == crate::beacon::slug_id(b)) {
+            built.collision = Some((a.clone(), b.clone()));
+            break;
+        }
+    }
     built
 }
 
@@ -289,7 +303,7 @@ mod tests {
             let d = protocol::decode_v2(p).unwrap();
             assert_eq!(d.name.as_deref(), Some(slug));
             assert_eq!(d.colors.len(), Role::COUNT);
-            assert!(d.prev.is_none() && d.next.is_none());
+            assert!(d.mac.is_none());
         }
         assert_eq!(decode_list(&list[..list.len() - 1]), Err(ListError::Truncated));
         assert_eq!(decode_list(&[9, 0]), Err(ListError::BadVersion(9)));
@@ -364,11 +378,11 @@ mod tests {
         expected.extend_from_slice(&entry);
         assert_eq!(list, expected);
         assert_eq!(crc16(&list), 0xDB97);
-        assert_eq!(list_mac(&key, &list), [0x35, 0xe8, 0x31, 0xb9]);
+        assert_eq!(list_mac(&key, &list), [0x38, 0xb7, 0x43, 0xd2]);
         let fs = frames(&list, &key, MAX_FRAME);
         assert_eq!(fs[0], vec![0x01, 0x01, 0x15, 0x00, 0x97, 0xdb]);
         assert_eq!(fs[1][..3], [0x02, 0x00, 0x00]);
-        assert_eq!(fs[2], vec![0x03, 0x35, 0xe8, 0x31, 0xb9]);
+        assert_eq!(fs[2], vec![0x03, 0x38, 0xb7, 0x43, 0xd2]);
         assert_eq!(att_error_meaning(0x83).unwrap(), "COMMIT rejected: bad MAC (pairing key differs)");
         assert!((ATT_ERROR_FIRST..=ATT_ERROR_LAST).all(|c| att_error_meaning(c).is_some()));
         assert!(att_error_meaning(0x01).is_none() && att_error_meaning(0x86).is_none());

@@ -542,49 +542,53 @@ pub const V2_TAG_FLAGS: u8 = 0x41;
 pub const V2_FLAG_LIGHT: u8 = 0x01;
 pub const V2_FLAG_FORCE_BLACK: u8 = 0x02;
 pub const V2_MAX_NAME: usize = 31;
-/// Beacon-only meta tags (protocol/BEACON.md §1): the themes before/after the current one in
-/// `omarchy-theme-list` order, so the watch can show what NEXT/PREV would switch to.
-/// Payload: `[bg r g b][fg r g b][accent r g b][alarm r g b][name UTF-8, <= V2_NEIGHBOUR_NAME]`.
-/// The theme parser skips them like any unknown tag.
-pub const V2_TAG_PREV: u8 = 0x42;
-pub const V2_TAG_NEXT: u8 = 0x43;
-pub const V2_NEIGHBOUR_NAME: usize = 20;
-/// Beacon-only: `[0x44][1][nonce]` — the nonce of the watch request this theme answers, or
-/// [`V2_ACK_NONE`] when the desktop changed on its own (protocol/BEACON.md §1).
-pub const V2_TAG_ACK: u8 = 0x44;
-pub const V2_ACK_NONE: u8 = 0x00;
+/// Beacon-only meta records (protocol/BEACON.md §1), in this order after the theme records:
+/// `[0x43][2][echo u16 le]` = the last request counter the desktop accepted (0 = none) —
+/// the sender's ack number, so the watch knows its request arrived and can retransmit;
+/// `[0x42][4][mac]` = `mac4(key, every byte before this record)`, always last. The theme
+/// parser skips both like any unknown tag, and the apply rule hashes only the bytes before
+/// the first of them (the echo changes with every request; the theme does not).
+pub const V2_TAG_MAC: u8 = 0x42;
+pub const V2_MAC_LEN: usize = 4;
+pub const V2_TAG_ECHO: u8 = 0x43;
 
-/// A neighbour theme as carried in the beacon: slug + the four core colours.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Neighbour {
-    pub name: String,
-    pub core: [Rgb; 4], // background, foreground, accent, alarm
+/// Append the `0x43` echo record to a beacon packet (before the mac).
+pub fn v2_append_echo(packet: &mut Vec<u8>, ctr: u16) {
+    packet.push(V2_TAG_ECHO);
+    packet.push(2);
+    packet.extend_from_slice(&ctr.to_le_bytes());
 }
 
-impl Neighbour {
-    pub fn from_palette(p: &WatchPalette) -> Neighbour {
-        Neighbour { name: p.name.clone(), core: [p.get(Role::Background), p.get(Role::TextPrimary), p.get(Role::Accent), p.get(Role::Danger)] }
-    }
+/// Append the `0x42` mac record to a beacon packet.
+pub fn v2_append_mac(packet: &mut Vec<u8>, mac: &[u8; V2_MAC_LEN]) {
+    packet.push(V2_TAG_MAC);
+    packet.push(V2_MAC_LEN as u8);
+    packet.extend_from_slice(mac);
 }
 
-/// Append a `0x42`/`0x43` record to a v2 packet.
-pub fn v2_append_neighbour(packet: &mut Vec<u8>, tag: u8, n: &Neighbour) {
-    let mut name = String::new();
-    for ch in n.name.chars() {
-        if name.len() + ch.len_utf8() > V2_NEIGHBOUR_NAME { break; }
-        name.push(ch);
+/// Offset of the first beacon meta record (`0x43` echo or `0x42` mac) in a v2 packet = the
+/// end of the theme bytes the receiver hashes for its apply rule; the packet length when
+/// there is none.
+pub fn v2_theme_end(b: &[u8]) -> usize {
+    if b.first() != Some(&2) {
+        return b.len();
     }
-    packet.push(tag);
-    packet.push((12 + name.len()) as u8);
-    for c in n.core {
-        packet.extend_from_slice(&[c.r, c.g, c.b]);
+    let mut i = 1;
+    while i < b.len() {
+        let tag = b[i];
+        if tag < 0x40 {
+            i += 4;
+        } else {
+            if tag == V2_TAG_MAC || tag == V2_TAG_ECHO {
+                return i;
+            }
+            if i + 2 > b.len() {
+                break;
+            }
+            i += 2 + b[i + 1] as usize;
+        }
     }
-    packet.extend_from_slice(name.as_bytes());
-}
-
-/// Append the `0x44` ack record to a beacon packet.
-pub fn v2_append_ack(packet: &mut Vec<u8>, nonce: u8) {
-    packet.extend_from_slice(&[V2_TAG_ACK, 1, nonce]);
+    b.len()
 }
 
 /// Firmware role ids (`theme_role_t`), append-only on their side. `cursor` (15) has no
@@ -667,10 +671,10 @@ pub struct V2Packet {
     pub name: Option<String>,
     pub light: Option<bool>,
     pub force_black: bool,
-    pub prev: Option<Neighbour>,
-    pub next: Option<Neighbour>,
-    /// The `0x44` record: `Some(nonce)`; `Some(V2_ACK_NONE)` = desktop-initiated.
-    pub ack: Option<u8>,
+    /// The `0x42` record of a beacon: `mac4(key, bytes before the record)`, unverified here.
+    pub mac: Option<[u8; V2_MAC_LEN]>,
+    /// The `0x43` record of a beacon: the last request counter the desktop accepted.
+    pub echo: Option<u16>,
 }
 
 impl V2Packet {
@@ -731,12 +735,10 @@ pub fn decode_v2(b: &[u8]) -> Result<V2Packet, DecodeError> {
             } else if tag == V2_TAG_FLAGS && n >= 1 {
                 out.light = Some(v[0] & V2_FLAG_LIGHT != 0);
                 out.force_black = v[0] & V2_FLAG_FORCE_BLACK != 0;
-            } else if (tag == V2_TAG_PREV || tag == V2_TAG_NEXT) && n >= 12 {
-                let core = [0, 3, 6, 9].map(|o| Rgb::new(v[o], v[o + 1], v[o + 2]));
-                let nb = Neighbour { name: String::from_utf8_lossy(&v[12..]).into_owned(), core };
-                if tag == V2_TAG_PREV { out.prev = Some(nb) } else { out.next = Some(nb) }
-            } else if tag == V2_TAG_ACK && n >= 1 {
-                out.ack = Some(v[0]);
+            } else if tag == V2_TAG_MAC && n == V2_MAC_LEN {
+                out.mac = Some([v[0], v[1], v[2], v[3]]);
+            } else if tag == V2_TAG_ECHO && n == 2 {
+                out.echo = Some(u16::from_le_bytes([v[0], v[1]]));
             }
             i += 2 + n;
         }
@@ -776,26 +778,23 @@ mod v2_tests {
     }
 
     #[test]
-    fn v2_neighbour_tags_round_trip_and_are_skipped_by_older_parsers() {
+    fn v2_mac_record_round_trips_and_is_skipped_by_the_theme_parser() {
         let p = sample();
         let mut bytes = encode_v2(&p, false);
         let base_len = bytes.len();
-        let mut q = p.clone();
-        q.name = "a-very-long-theme-name-beyond-twenty".into();
-        v2_append_neighbour(&mut bytes, V2_TAG_PREV, &Neighbour::from_palette(&q));
-        v2_append_neighbour(&mut bytes, V2_TAG_NEXT, &Neighbour { name: "nord".into(), core: [Rgb::new(1, 2, 3); 4] });
+        assert_eq!(decode_v2(&bytes).unwrap().mac, None);
+        assert_eq!(v2_theme_end(&bytes), base_len);
+        v2_append_echo(&mut bytes, 0x1234);
+        assert_eq!(v2_theme_end(&bytes), base_len, "the echo is a meta record too");
+        v2_append_mac(&mut bytes, &[0xA5, 1, 2, 3]);
         let d = decode_v2(&bytes).unwrap();
-        assert_eq!(d.colors.len(), Role::COUNT, "neighbour records must not touch the palette");
-        assert_eq!(d.prev.as_ref().unwrap().name, "a-very-long-theme-na");
-        assert_eq!(d.prev.as_ref().unwrap().core[2], q.get(Role::Accent));
-        assert_eq!(d.next.as_ref().unwrap().name, "nord");
-        assert_eq!(bytes.len(), base_len + 2 + 12 + 20 + 2 + 12 + 4);
-        assert_eq!(d.ack, None);
-        v2_append_ack(&mut bytes, 0xA5);
-        let d = decode_v2(&bytes).unwrap();
-        assert_eq!(d.ack, Some(0xA5));
-        assert_eq!(&bytes[bytes.len() - 3..], &[V2_TAG_ACK, 1, 0xA5]);
-        assert_eq!(d.colors.len(), Role::COUNT);
+        assert_eq!(d.mac, Some([0xA5, 1, 2, 3]));
+        assert_eq!(d.echo, Some(0x1234));
+        assert_eq!(bytes.len(), base_len + 4 + 2 + V2_MAC_LEN);
+        assert_eq!(v2_theme_end(&bytes), base_len, "the apply-rule hash must stop before the mac");
+        assert_eq!(d.colors.len(), Role::COUNT, "the mac record must not touch the palette");
+        assert_eq!(d.name.as_deref(), Some("catppuccin-latte"));
+        assert_eq!(v2_theme_end(&[1, 2, 3]), 3);
     }
 
     #[test]
