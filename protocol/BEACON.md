@@ -24,8 +24,8 @@ What changed and why, in one line each:
   and BLE Mesh's segment acks. Before this a request lost on the air was a lost gesture
   (on hardware: 6 of 16 in one series, every one a gesture made a few seconds after the
   previous answer).
-- Radio: the desktop beacons at a **fixed 80 ms** (the 100–110 ms range plus the mandatory
-  0–10 ms advDelay could exceed the watch's 120 ms window); the watch advertises every
+- Radio: the desktop beacons at a **fixed 30 ms**, constantly (the watch scans a 45 ms
+  window every 1 s idle, every 320 ms with a request out); the watch advertises every
   **1 s** when idle with an empty scan response (the desktop's scan is active, so the watch
   answered a SCAN_RSP with the service UUID every 200 ms, forever) and 100 ms while a
   request is on the air.
@@ -97,15 +97,16 @@ a stranger and the watch's flash budget.
 There is no sequence number. A restarted desktop, a late joiner, a beacon delivered twice
 and two desktops in range (only one has the key) all converge on the content.
 
-**Timing.** Fixed 80 ms interval steady state (min = max; the controller adds 0–10 ms of
-advDelay per event, so the worst gap on a primary channel is 90 ms, inside the watch's 120 ms
-window with margin). For 10 s after a change, 30 ms ("burst") so a scanning watch catches
-it on the first window. The watch scans 120 ms every 2.56 s while the screen is on (≈4.7 %
-of radio time), one window immediately when the screen turns on, and 120 ms every 640 ms
-while it has a request on the air (≈19 %, ≤10 s); no scanning with the screen off (the
-theme cannot be seen then anyway). Worst-case latency for a desktop-initiated change,
-screen on: 2.56 s. The steady interval is to be measured once with `btmon` and the number
-recorded here — the daemon cannot see what BlueZ actually programmed.
+**Timing.** Fixed 30 ms interval, constantly (min = max; the controller adds 0–10 ms of
+advDelay per event, so the worst gap on a primary channel is 40 ms, inside the watch's 45 ms
+window). No "burst" after a change: the desktop's rate is the same at all times, and the
+watch's window is sized for it. The watch runs one continuous scan with a 45 ms window
+every 1 s while the screen is on (4.5 % of radio time, the same budget as the earlier
+120 ms / 2.56 s, with 2.5× lower latency), one window immediately when the screen turns
+on, and 45 ms every 320 ms while it has a request on the air (≈14 %, ≤10 s); no scanning
+with the screen off (the theme cannot be seen then anyway). Worst-case latency for a
+desktop-initiated change, screen on: 1 s. The steady interval is to be measured once with
+`btmon` and the number recorded here — the daemon cannot see what BlueZ actually programmed.
 
 ## 2. Request (watch → desktop)
 
@@ -124,7 +125,7 @@ off  size  field
                      a mixed pair fails on the kind, not on the length)
  2    2    ctr       monotonic counter, per pairing key (see below); never 0
  4    1    op        0x01 SET     switch to the theme in `arg`
-                     0x02 RESEND  please burst the state beacon
+                     0x02 RESEND  ping: echo this counter, change nothing
                      0x03 LIST    please push the theme list over GATT (§3)
  5    2    arg       SET: crc16(slug). Else 0.
  7    4    mac       mac4(k, bytes 0 .. 7)
@@ -177,16 +178,16 @@ advertisement returns to its 1 s interval. The watch shows the state (sent / rec
 applied) so "no answer" only ever means the desktop was unreachable for ~10 s.
 
 **The desktop, on accepting** — first, before anything else, it puts `ctr` into the beacon's
-echo and starts a burst, so the watch sees "received" within one scan window (≤ 0.64 s) and
+echo, so the watch sees "received" within one scan window (≤ 0.32 s) and
 stops retransmitting while `omarchy-theme-set` is still running. Then:
 
 - SET, slug known → `omarchy-theme-set <slug>` (2–5 s, apps retint; the hook then triggers
-  a fresh beacon and a burst). Requests do not queue: while one `omarchy-theme-set` runs,
+  a fresh beacon). Requests do not queue: while one `omarchy-theme-set` runs,
   only the newest SET received is kept and runs next.
 - SET, slug unknown → the watch's list is stale (a theme removed or renamed since the push):
   the desktop pushes the current list over GATT to the requesting address (§3) and changes
   no theme. The COMMIT takes the SET off the air; the user picks again from the fresh list.
-- RESEND → nothing more (the echo burst above is the answer).
+- RESEND → nothing more (the echo above is the answer).
 - LIST → a GATT connection to the requesting address and the §3 transfer.
 
 **Desktop scan.** BlueZ discovery is an *active* scan (`SetDiscoveryFilter {DuplicateData:
@@ -237,8 +238,8 @@ Where the radio time goes, and what this version does about it:
 
 | activity | before v3 | v3 |
 |---|---|---|
-| beacon scan, screen on | 120 ms / 2.56 s ≈ 4.7 % | unchanged (user's call: ≤ 3 s latency) |
-| beacon scan, request out | 120 ms / 640 ms ≈ 19 %, ≤ 10 s | unchanged; typically over in 1–2 s (echo ≤ 0.64 s, theme +0.4 s) |
+| beacon scan, screen on | 120 ms / 2.56 s ≈ 4.7 % | **45 ms / 1 s = 4.5 %** (same budget, ≤ 1 s latency; needs the desktop at 30 ms) |
+| beacon scan, request out | 120 ms / 640 ms ≈ 19 %, ≤ 10 s | **45 ms / 320 ms ≈ 14 %**; typically over in 1–2 s (echo ≤ 0.32 s, theme +0.4 s) |
 | retransmissions | — | ≤ 3 stop/start per gesture, milliseconds of radio |
 | beacon scan, screen off | none | none |
 | own advertisement, idle | 200 ms, connectable + scannable | **1 s**, connectable (ADV_IND) |
@@ -247,7 +248,7 @@ Where the radio time goes, and what this version does about it:
 | NVS writes | every applied beacon | after 10 s stable, only if different |
 | HMAC | — | one SHA-256 per *changed* theme (rule 1 of §1 runs first) |
 
-The 120 ms / 2.56 s figure is still to be **measured** (`SCROLL_STRESS=1` + periodic
+The 45 ms / 1 s figure is still to be **measured** (`SCROLL_STRESS=1` + periodic
 ext-scan, watching "largest DMA block" in the heartbeat) — the earlier screen freeze was
 internal-RAM starvation while the radio was up.
 
@@ -317,9 +318,9 @@ When the desktop pushes:
 4. **When the watch asks for a theme the desktop does not have** — a SET whose crc matches
    no installed slug (§2): pushed unconditionally, like 3.
 
-After every successful push the desktop bursts the state beacon for 10 s: the watch has just
-forgotten its applied theme (a list COMMIT clears `applied_crc` like a timeout does) and
-repaints from the first beacon it sees.
+After a successful push the watch has just forgotten its applied theme (a list COMMIT
+clears `applied_crc` like a timeout does) and repaints from the first beacon it sees, ≤ 1 s
+later; the desktop does nothing extra (the beacon is always on the air at 30 ms).
 
 The watch is local-first with the list: on a swipe or a pick it applies the entry's palette
 itself at once and *then* sends SET with that entry's slug crc; the beacon that answers
@@ -367,6 +368,8 @@ Settled by the user:
 - 2026-08-27 (v3): a counter is fine (it is not a clock and needs no sync beyond pairing);
   keep the 2.56 s idle scan (≤ 3 s latency over battery); idle advertisement 1 s and
   non-scannable; MAC the beacon now.
+- 2026-08-28: same scan budget, spent as 45 ms every 1 s instead of 120 ms every 2.56 s;
+  the desktop therefore beacons at 30 ms constantly and the 10 s burst is gone.
 
 Open, in the order they should be taken:
 1. **Pairing hardening**: accept the `…0005` write only within ~60 s of the user opening

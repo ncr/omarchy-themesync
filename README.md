@@ -107,13 +107,13 @@ Verified 2026-08-26 on the device: 70 bytes out, "15 roles, all sent roles match
 
 **Two-way, connection-less (`protocol/BEACON.md`, v3 since 2026-08-27).** `themesync daemon`
 broadcasts the current theme as an extended advertisement (manufacturer data `0xFFFF`:
-`'T' 0x01` + the v2 packet + `0x42` = a 4-byte HMAC over everything before it; ~76 B, fixed
-80 ms, 30 ms burst for 10 s after a change) and scans for the watch's requests (`'T' 0x03
+`'T' 0x01` + the v2 packet + `0x42` = a 4-byte HMAC over everything before it; ~80 B, fixed
+30 ms, constantly) and scans for the watch's requests (`'T' 0x03
 ctr op arg mac`, 11 B, HMAC-keyed, a per-key monotonic counter instead of a nonce — the
 desktop accepts only `ctr > last accepted`, which covers repeats, BlueZ's cached copies,
 daemon restarts and replays in one rule). Ops: SET <slug crc> → `omarchy-theme-set`,
 newest wins; an unknown slug means the watch's list is stale and is answered with the list;
-RESEND → a burst; LIST → the theme list. There is no sequence number and no ack: the watch
+RESEND → a ping (the echo is the answer); LIST → the theme list. There is no sequence number and no ack: the watch
 applies a beacon whose theme bytes differ from what it shows (after verifying the MAC), and
 a request is answered when the beacon shows the theme it asked for. No time in any packet.
 Pairing (§2b): `themesync pair` hands the daemon a *pending* key, writes
