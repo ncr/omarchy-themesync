@@ -89,13 +89,21 @@ echo changes with every request, the theme does not).
 4. Apply, `applied_crc = crc`. If the slug equals `expect`: the request is answered — clear
    `expect`, take the request off the air.
 
-Persisting: the watch writes the theme to NVS only when it has been stable for 10 s and
-differs from what NVS holds (verified 2026-08-27: `saved to NVS: 'osaka-jade' (72 B,
-stable 10 s)`). Applying is cheap; flash is not, and only the MAC stands between
-a stranger and the watch's flash budget.
+Persisting: the watch writes the theme to NVS only when it has been stable for 10 s,
+differs from what NVS holds, and **at least 60 s after the previous write** (a change inside
+that minute waits for it to end; the first write after boot is not delayed). Verified
+2026-08-27: `saved to NVS: 'osaka-jade' (72 B, stable 10 s)`.
 
 There is no sequence number. A restarted desktop, a late joiner, a beacon delivered twice
 and two desktops in range (only one has the key) all converge on the content.
+
+**Replay is accepted.** The beacon has no freshness (the echo is the desktop's ack number,
+not a nonce), so a beacon recorded under the current key stays valid: a stranger who
+recorded two beacons can alternate them and the watch follows — the worst outcome is a
+theme the desktop once had, until the real beacon (≤ 1 s away with the screen on) wins
+again. The MAC stops forgery, not replay; the 10 s stability window and the 60 s NVS floor
+bound the flash cost of a replay to one write a minute. A counter under the MAC would close
+this; it is not worth a persisted state on the watch for a nuisance.
 
 **Timing.** Fixed 30 ms interval, constantly (min = max; the controller adds 0–10 ms of
 advDelay per event, so the worst gap on a primary channel is 40 ms, inside the watch's 45 ms
@@ -137,8 +145,9 @@ off  size  field
  4    1    op        0x01 SET     switch to the theme in `arg`
                      0x02 RESEND  ping: echo this counter, change nothing
                      0x03 LIST    please push the theme list over GATT (§3)
- 5    2    arg       SET: crc16(slug). Else 0.
- 7    4    mac       mac4(k, bytes 0 .. 7)
+ 5    2    arg       SET: crc16(slug). Else 0 (enforced: a signed RESEND/LIST with arg ≠ 0 is dropped).
+ 7    4    mac       mac4(k, bytes 0 .. 7)   — checked before anything else in the packet is
+                                              looked at: a stranger gets one answer, no parse oracle
 ```
 
 11 bytes. No time anywhere in the protocol.
@@ -152,11 +161,14 @@ reads `next_block` from NVS, uses counters from there, and writes `next_block + 
 one flash write per 100 presses, a crash costs at most 100 values (BLE Mesh does the same
 with its sequence numbers). At 65 535 the watch stops sending and shows "re-pair".
 
-**Desync is loud, never silent.** A request with `ctr <= last` (an erased watch after a
+**Desync is loud, never silent.** A request with `ctr < last` (an erased watch after a
 reflash, a replay, a stale copy from BlueZ's cache) is dropped with a log line naming both
 numbers and the remedy (`themesync pair` again, or `themesync reset-counter` on a watch you
-trust), and `themesync status` shows the count of such drops. The desktop never accepts a
-backward jump on its own.
+trust), and `themesync status` shows the count of such drops. `ctr == last` is different:
+it is the watch's own retransmission of the request just accepted (BlueZ re-delivers every
+advertising event while it is on the air) — expected, dropped silently, not counted. The
+desktop never accepts a backward jump on its own. A counter file the desktop cannot parse
+locks it (nothing accepted, `status` says so) rather than reopening every replay as 0.
 
 Acceptance on the desktop: kind and length right, mac valid under the active key (or the
 pending key: §2b), `ctr > last`. Nothing is keyed by the source address any more; the address
@@ -227,6 +239,9 @@ desktop: a §2 request whose MAC verifies with the pending key = confirmation:
   the pending key becomes the active key (~/.config/themesync/key), last counter = that
   request's ctr, the watch's address is saved (~/.config/themesync/watch) for list pushes;
   the old key stays active until then, so a wrong code or a timeout changes nothing.
+  The desktop forgets the pending key 120 s after `pair` handed it over (same window as
+  the watch; it survives a daemon restart inside the window). `pair` needs the daemon: without
+  one nobody can see the confirmation, so the CLI refuses rather than writing an unconfirmed key.
 ```
 
 The code is a confirmation, not key material (8 bits): it proves the person at the watch is
@@ -280,9 +295,13 @@ The watch keeps the list on its SD card (NVS fallback).
 CHARACTERISTIC  7a0e0006-0f0e-4d0c-9c0b-0a0908070605  "list"   read + write (with response,
                                                                 one frame per write)
 
-READ → status   [0x01 ver][count u8][crc16 le][flags u8]      5 bytes
+READ → status   [0x02 ver][count u8][crc16 le][flags u8][nonce u32 le]    9 bytes
                 crc16 = crc16 of the stored list bytes
                 flags bit0 = stored on SD, bit1 = a list is loaded
+                nonce: random, never 0, drawn at boot and again after EVERY COMMIT frame
+                (accepted or rejected); BEGIN/DATA leave it. The desktop reads it right
+                before BEGIN and signs the COMMIT against it. (The list bytes' own version
+                byte stays 0x01: the list format did not change, the status did.)
 
 WRITE frames    each ≤ MTU − 3 (≤ 509 B at the watch's preferred MTU 512)
   BEGIN   [0x01][count u8][total u16 le][crc16 u16 le]          crc over the `total` list bytes
@@ -293,8 +312,10 @@ WRITE frames    each ≤ MTU − 3 (≤ 509 B at the watch's preferred MTU 512)
                                                                  After any rejected frame, DATA
                                                                  keeps failing with 0x81 until a
                                                                  new BEGIN.
-  COMMIT  [0x03][mac 4 B]   mac = mac4(k, 0x03 ‖ total u16 le ‖ crc16 u16 le ‖ list bytes):
-                            bound to this transfer's header, not just its content. The watch
+  COMMIT  [0x03][mac 4 B]   mac = mac4(k, 0x03 ‖ nonce u32 le ‖ total u16 le ‖ crc16 u16 le ‖ list bytes):
+                            bound to this transfer (the nonce), so a recorded push cannot be
+                            played back later — the characteristic is writable by any central
+                            and this MAC is the only thing that gates it. The watch
                             checks crc + mac, saves, swaps the list in, and takes its own
                             request (LIST or SET, if any) off the air — synchronously, before
                             the ATT ack, so a READ right after the ack shows the new count/crc.
@@ -302,6 +323,10 @@ WRITE frames    each ≤ MTU − 3 (≤ 509 B at the watch's preferred MTU 512)
                             parse → 0x85; the list is discarded.
 
 LIST BYTES      [0x01 ver][count u8] then count × [len u8][theme packet v2, `len` bytes]
+                A slug longer than 31 bytes (the v2 name limit) is left out of the list: the
+                packet would truncate the name the watch hashes into its SET, which could then
+                never match the full slug the desktop resolves — an endless "unknown theme →
+                push the list" loop.
                 The v2 packet is exactly what the state beacon / characteristic …0002 carry:
                 [0x02] + [role R G B] colour records (every role the desktop maps: 1..14;
                 cursor (15) is derived by the watch, as for the beacon) + 0x40 name = the
@@ -363,9 +388,10 @@ beacon   theme: bg 10 20 30, fg 40 50 60, name "nord", flags 0
 
 list     01 01 12 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00     (21 B)
          crc16 0xDB97
+status   02 01 97 db 02 04 03 02 01                                    (READ before BEGIN: nonce 0x01020304)
 BEGIN    01 01 15 00 97 db
 DATA     02 00 00 + the 21 list bytes
-COMMIT   03 38 b7 43 d2
+COMMIT   03 00 7f 0f 8a          mac4(k, 03 ‖ 04 03 02 01 ‖ 15 00 ‖ 97 db ‖ list); with nonce 0: 12 05 ec b8
 ```
 
 ## 5. Settled, and still open
@@ -380,6 +406,11 @@ Settled by the user:
   non-scannable; MAC the beacon now.
 - 2026-08-28: same scan budget, spent as 45 ms every 1 s instead of 120 ms every 2.56 s;
   the desktop therefore beacons at 30 ms constantly and the 10 s burst is gone.
+- 2026-08-28 (code review, `docs/review-code-2026-08-28.md`): the list COMMIT MAC gets a
+  per-transfer nonce from the READ status (it was a pure function of the list bytes, so a
+  recorded push replayed); beacon replay is accepted and written down, with a 60 s floor on
+  NVS writes; the request MAC is checked first and `arg = 0` is enforced; the pending key
+  expires after 120 s on the desktop too.
 
 Open, in the order they should be taken:
 1. **Pairing hardening**: accept the `…0005` write only within ~60 s of the user opening

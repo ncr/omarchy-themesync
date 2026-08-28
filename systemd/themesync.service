@@ -1,27 +1,31 @@
 # User service: broadcast the current Omarchy theme as a BLE beacon, scan for the watch's
 # requests, and serve the hook's `sync` over the daemon socket (protocol/BEACON.md).
 #
-#   cp systemd/themesync.service ~/.config/systemd/user/
-#   systemctl --user daemon-reload && systemctl --user enable --now themesync
+#   themesync install            writes this unit (with the binary's real path) and the hook,
+#                                then enables the service
 #   journalctl --user -u themesync -f
 #
-# Development loop (the daemon is under active development):
-#   cargo install --path host && systemctl --user restart themesync
-#
-# --no-gatt: the watch receives the beacon, so no GATT push per change. Drop the flag to get
-# the one-shot GATT push back (e.g. for a receiver that cannot scan extended advertising).
-# Needs bluez. The request scan keeps the adapter in passive LE scanning; if A2DP audio on the
-# same adapter stutters, stop the service and report it.
+# Tied to the graphical session like Omarchy's own user units (bt-agent, fcitx5): `After=` is
+# ordering only, so with `WantedBy=default.target` this would start on an SSH login and at
+# boot before the session environment (OMARCHY_PATH, WAYLAND_DISPLAY) is imported, and
+# omarchy-theme-set would half-apply. Needs bluez with `Experimental = true` in
+# /etc/bluetooth/main.conf (the advertisement monitor; without it requests from the watch
+# are slow or lost) and a BLE 5 controller (extended advertising).
 [Unit]
 Description=Omarchy theme beacon + watch request scanner (themesync daemon)
 After=bluetooth.target graphical-session.target
+PartOf=graphical-session.target
 Wants=bluetooth.target
+ConditionEnvironment=WAYLAND_DISPLAY
+ConditionPathIsDirectory=/sys/class/bluetooth
 
 [Service]
 Type=simple
 ExecStart=%h/.cargo/bin/themesync daemon --no-gatt
-Restart=always
-RestartSec=3
+# The daemon waits for bluetoothd / a powered adapter itself, with backoff; only a real
+# failure (no extended advertising, socket lost) exits, and then a restart is right.
+Restart=on-failure
+RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

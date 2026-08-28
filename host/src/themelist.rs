@@ -6,10 +6,12 @@
 //! ```text
 //! LIST BYTES   [0x01 ver][count u8] then count × [len u8][v2 packet: [2] roles… 0x40 slug 0x41 flags]
 //!              omarchy-theme-list order (= the switcher order on the watch); no 0x42 mac record.
-//! READ status  [0x01 ver][count][crc16 le][flags]   5 bytes; flags bit0 stored on SD, bit1 a list is loaded
+//! READ status  [0x02 ver][count][crc16 le][flags][nonce u32 le]   9 bytes; flags bit0 stored on SD,
+//!              bit1 a list is loaded; the nonce is fresh per transfer (new at boot and after
+//!              every COMMIT, accepted or not) and is what makes a recorded push unreplayable
 //! WRITE frames BEGIN  [0x01][count][total u16 le][crc16 u16 le]
 //!              DATA   [0x02][offset u16 le][bytes…]     strictly sequential
-//!              COMMIT [0x03][mac 4 B]                   mac = HMAC(pairing key, 03 ‖ total ‖ crc16 ‖ list bytes)[0..4]
+//!              COMMIT [0x03][mac 4 B]                   mac = HMAC(pairing key, 03 ‖ nonce u32 le ‖ total ‖ crc16 ‖ list bytes)[0..4]
 //! ```
 //!
 //! crc16 is CRC-16/CCITT-FALSE ([`crc16`]), the one the SET request already uses.
@@ -21,7 +23,10 @@ use crate::omarchy::Omarchy;
 use crate::palette::map_source;
 use crate::protocol::{self, crc16};
 
+/// The list bytes' format version (first byte of the list).
 pub const LIST_VERSION: u8 = 1;
+/// The READ status format version (first byte of the status); 2 = with the nonce.
+pub const STATUS_VERSION: u8 = 2;
 /// `THEMELIST_MAX` / `THEMELIST_MAX_BYTES` in the watch firmware (`main/themelist.h`).
 pub const MAX_ENTRIES: usize = 64;
 pub const MAX_BYTES: usize = 8192;
@@ -39,7 +44,7 @@ pub const COMMIT_LEN: usize = 1 + MAC_LEN;
 pub const MAX_FRAME: usize = 509;
 pub const MIN_FRAME: usize = 20;
 
-pub const STATUS_LEN: usize = 5;
+pub const STATUS_LEN: usize = 9;
 pub const STATUS_FLAG_SD: u8 = 0x01;
 pub const STATUS_FLAG_LOADED: u8 = 0x02;
 
@@ -127,11 +132,13 @@ pub fn decode_list(b: &[u8]) -> Result<Vec<Vec<u8>>, ListError> {
     Ok(out)
 }
 
-/// The COMMIT MAC: `mac4(key, 0x03 ‖ total u16 le ‖ crc16 u16 le ‖ list bytes)` — bound to
-/// this transfer's header, not just its content (BEACON.md §3a).
-pub fn list_mac(key: &[u8], list: &[u8]) -> [u8; MAC_LEN] {
-    let mut m = Vec::with_capacity(5 + list.len());
+/// The COMMIT MAC: `mac4(key, 0x03 ‖ nonce u32 le ‖ total u16 le ‖ crc16 u16 le ‖ list bytes)`.
+/// The nonce comes from the watch's READ status just before this transfer and changes after
+/// every COMMIT, so a recorded push cannot be played back (BEACON.md §3a).
+pub fn list_mac(key: &[u8], nonce: u32, list: &[u8]) -> [u8; MAC_LEN] {
+    let mut m = Vec::with_capacity(9 + list.len());
     m.push(FRAME_COMMIT);
+    m.extend_from_slice(&nonce.to_le_bytes());
     m.extend_from_slice(&(list.len() as u16).to_le_bytes());
     m.extend_from_slice(&crc16(list).to_le_bytes());
     m.extend_from_slice(list);
@@ -144,8 +151,9 @@ pub fn frame_len_for_mtu(mtu: u16) -> usize {
 }
 
 /// Every write for one transfer, in order: BEGIN, the DATA frames (each at most `frame`
-/// bytes in total), COMMIT.
-pub fn frames(list: &[u8], key: &[u8], frame: usize) -> Vec<Vec<u8>> {
+/// bytes in total), COMMIT signed against the watch's current `nonce`.
+pub fn frames(list: &[u8], key: &[u8], nonce: u32, frame: usize) -> Vec<Vec<u8>> {
+    assert!(list.len() <= MAX_BYTES, "list of {} bytes exceeds the {MAX_BYTES}-byte limit `build` enforces", list.len());
     let frame = frame.clamp(MIN_FRAME, MAX_FRAME);
     let chunk = frame - DATA_HEADER_LEN;
     let count = list.get(1).copied().unwrap_or(0);
@@ -162,7 +170,7 @@ pub fn frames(list: &[u8], key: &[u8], frame: usize) -> Vec<Vec<u8>> {
         out.push(f);
     }
     let mut commit = vec![FRAME_COMMIT];
-    commit.extend_from_slice(&list_mac(key, list));
+    commit.extend_from_slice(&list_mac(key, nonce, list));
     out.push(commit);
     out
 }
@@ -185,6 +193,8 @@ pub struct ListStatus {
     pub crc: u16,
     pub on_sd: bool,
     pub loaded: bool,
+    /// Fresh per transfer; the COMMIT MAC is computed over it.
+    pub nonce: u32,
 }
 
 impl ListStatus {
@@ -192,16 +202,24 @@ impl ListStatus {
         if b.len() < STATUS_LEN {
             return Err(ListError::Truncated);
         }
-        if b[0] != LIST_VERSION {
+        if b[0] != STATUS_VERSION {
             return Err(ListError::BadVersion(b[0]));
         }
-        Ok(ListStatus { version: b[0], count: b[1], crc: u16::from_le_bytes([b[2], b[3]]), on_sd: b[4] & STATUS_FLAG_SD != 0, loaded: b[4] & STATUS_FLAG_LOADED != 0 })
+        Ok(ListStatus {
+            version: b[0],
+            count: b[1],
+            crc: u16::from_le_bytes([b[2], b[3]]),
+            on_sd: b[4] & STATUS_FLAG_SD != 0,
+            loaded: b[4] & STATUS_FLAG_LOADED != 0,
+            nonce: u32::from_le_bytes([b[5], b[6], b[7], b[8]]),
+        })
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn encode(&self) -> [u8; STATUS_LEN] {
         let crc = self.crc.to_le_bytes();
-        [self.version, self.count, crc[0], crc[1], (if self.on_sd { STATUS_FLAG_SD } else { 0 }) | (if self.loaded { STATUS_FLAG_LOADED } else { 0 })]
+        let n = self.nonce.to_le_bytes();
+        [self.version, self.count, crc[0], crc[1], (if self.on_sd { STATUS_FLAG_SD } else { 0 }) | (if self.loaded { STATUS_FLAG_LOADED } else { 0 }), n[0], n[1], n[2], n[3]]
     }
 
     /// True when the watch already holds exactly this list.
@@ -212,7 +230,7 @@ impl ListStatus {
 
 impl fmt::Display for ListStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} themes, crc {:#06x}, {}{}", self.count, self.crc, if self.loaded { "loaded" } else { "no list" }, if self.on_sd { ", on SD" } else { "" })
+        write!(f, "{} themes, crc {:#06x}, {}{}, nonce {:#010x}", self.count, self.crc, if self.loaded { "loaded" } else { "no list" }, if self.on_sd { ", on SD" } else { "" }, self.nonce)
     }
 }
 
@@ -246,6 +264,13 @@ pub fn build(om: &Omarchy) -> Built {
     let mut built = Built::default();
     let mut total = 2usize;
     for slug in om.list_themes() {
+        // The entry's 0x40 name is what the watch hashes into a SET; a slug the packet
+        // would truncate could never match its own crc (the desktop resolves the full
+        // slug), and the SET would loop on "unknown theme -> push the list" forever.
+        if slug.len() > protocol::V2_MAX_NAME {
+            built.skipped.push((slug, format!("slug longer than {} bytes", protocol::V2_MAX_NAME)));
+            continue;
+        }
         if packets.len() == MAX_ENTRIES {
             built.skipped.push((slug, format!("beyond the watch's {MAX_ENTRIES}-entry limit")));
             continue;
@@ -325,7 +350,7 @@ mod tests {
         let list = encode_list(&packets).unwrap();
         let key = [7u8; 16];
         for frame in [MIN_FRAME, 100, 244, MAX_FRAME] {
-            let fs = frames(&list, &key, frame);
+            let fs = frames(&list, &key, 7, frame);
             assert_eq!(fs[0], {
                 let mut b = vec![FRAME_BEGIN, 19];
                 b.extend_from_slice(&(list.len() as u16).to_le_bytes());
@@ -343,28 +368,28 @@ mod tests {
             let last = fs.last().unwrap();
             assert_eq!(last.len(), COMMIT_LEN);
             assert_eq!(last[0], FRAME_COMMIT);
-            assert_eq!(&last[1..], &list_mac(&key, &list));
+            assert_eq!(&last[1..], &list_mac(&key, 7, &list));
             assert_eq!(fs.len(), 2 + list.len().div_ceil(frame - DATA_HEADER_LEN));
         }
         assert_eq!(frame_len_for_mtu(23), MIN_FRAME);
         assert_eq!(frame_len_for_mtu(256), 253);
         assert_eq!(frame_len_for_mtu(512), MAX_FRAME);
         assert_eq!(frame_len_for_mtu(517), MAX_FRAME);
-        assert_eq!(frames(&list, &key, 1)[1].len(), MIN_FRAME); // silly sizes are clamped
+        assert_eq!(frames(&list, &key, 7, 1)[1].len(), MIN_FRAME); // silly sizes are clamped
     }
 
     #[test]
     fn status_round_trip_and_holds() {
         let list = encode_list(&[theme("nord", 4), theme("rose-pine", 5)]).unwrap();
-        let st = ListStatus { version: 1, count: 2, crc: crc16(&list), on_sd: true, loaded: true };
+        let st = ListStatus { version: STATUS_VERSION, count: 2, crc: crc16(&list), on_sd: true, loaded: true, nonce: 0x01020304 };
         assert_eq!(ListStatus::decode(&st.encode()), Ok(st));
         assert!(st.holds(&list));
         assert!(!ListStatus { loaded: false, ..st }.holds(&list));
         assert!(!ListStatus { crc: st.crc ^ 1, ..st }.holds(&list));
         assert!(!ListStatus { count: 3, ..st }.holds(&list));
-        assert_eq!(ListStatus::decode(&[1, 0, 0, 0]), Err(ListError::Truncated));
-        assert_eq!(ListStatus::decode(&[2, 0, 0, 0, 0]), Err(ListError::BadVersion(2)));
-        assert_eq!(st.to_string(), format!("2 themes, crc {:#06x}, loaded, on SD", st.crc));
+        assert_eq!(ListStatus::decode(&[2, 0, 0, 0, 0, 0, 0, 0]), Err(ListError::Truncated));
+        assert_eq!(ListStatus::decode(&[1, 0, 0, 0, 0, 0, 0, 0, 0]), Err(ListError::BadVersion(1)));
+        assert_eq!(st.to_string(), format!("2 themes, crc {:#06x}, loaded, on SD, nonce 0x01020304", st.crc));
     }
 
     /// Interop anchor shared with the watch firmware: key 00 01 .. 0f, one two-colour
@@ -378,11 +403,12 @@ mod tests {
         expected.extend_from_slice(&entry);
         assert_eq!(list, expected);
         assert_eq!(crc16(&list), 0xDB97);
-        assert_eq!(list_mac(&key, &list), [0x38, 0xb7, 0x43, 0xd2]);
-        let fs = frames(&list, &key, MAX_FRAME);
+        assert_eq!(list_mac(&key, 0x01020304, &list), [0x00, 0x7f, 0x0f, 0x8a]);
+        assert_eq!(list_mac(&key, 0, &list), [0x12, 0x05, 0xec, 0xb8]);
+        let fs = frames(&list, &key, 0x01020304, MAX_FRAME);
         assert_eq!(fs[0], vec![0x01, 0x01, 0x15, 0x00, 0x97, 0xdb]);
         assert_eq!(fs[1][..3], [0x02, 0x00, 0x00]);
-        assert_eq!(fs[2], vec![0x03, 0x38, 0xb7, 0x43, 0xd2]);
+        assert_eq!(fs[2], vec![0x03, 0x00, 0x7f, 0x0f, 0x8a]);
         assert_eq!(att_error_meaning(0x83).unwrap(), "COMMIT rejected: bad MAC (pairing key differs)");
         assert!((ATT_ERROR_FIRST..=ATT_ERROR_LAST).all(|c| att_error_meaning(c).is_some()));
         assert!(att_error_meaning(0x01).is_none() && att_error_meaning(0x86).is_none());

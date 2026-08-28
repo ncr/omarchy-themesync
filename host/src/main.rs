@@ -433,20 +433,19 @@ async fn main() -> Result<()> {
             let key = beacon::new_key().context("reading /dev/urandom")?;
             if no_watch {
                 let path = beacon::save_key(&key)?;
-                println!("key written to {} (no watch involved; restart the daemon to use it)", path.display());
+                println!("key written to {} and the request counter reset (no watch involved; restart the daemon to use it)", path.display());
                 return Ok(());
             }
             let code = beacon::new_key().context("reading /dev/urandom")?[0];
             // Hand the key to the daemon as *pending*: it becomes active only when the watch
             // sends a request signed with it, i.e. after the code was entered correctly.
-            let daemon = match ipc::request(&Request::PairPending { key_hex: protocol::to_hex(&key) }, Duration::from_secs(5)).await? {
-                Some(r) if r.ok => true,
+            match ipc::request(&Request::PairPending { key_hex: protocol::to_hex(&key) }, Duration::from_secs(5)).await? {
+                Some(r) if r.ok => {}
                 Some(r) => bail!("daemon refused the pending key: {}", r.message.unwrap_or_default()),
-                None => false,
-            };
-            if !daemon {
-                println!("note: no daemon running — the key is saved right away and cannot be confirmed here");
-                beacon::save_key(&key)?;
+                // Without the daemon nobody can see the watch's confirmation, and writing the
+                // key unconfirmed would cut off the currently paired watch on a mistyped code
+                // (BEACON.md §2b: the old key stays active until the new one is confirmed).
+                None => bail!("the daemon is not running: start it first (systemctl --user start themesync), or use --no-watch to write a key without confirmation"),
             }
             let (_adapter, peripheral) = find_watch(&ble.options(), 3).await?;
             let r = ble::write_characteristic(&peripheral, ble::MINI_CHR_KEY, &beacon::encode_pair_write(code, &key)).await;
@@ -458,9 +457,6 @@ async fn main() -> Result<()> {
             println!("    └──────────────┘");
             println!();
             println!("enter it on the watch's Pairing screen and confirm.");
-            if !daemon {
-                return Ok(());
-            }
             let deadline = Instant::now() + Duration::from_secs(120);
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -501,8 +497,8 @@ async fn main() -> Result<()> {
                     Some(k) => (k, true),
                     None => (([0u8; beacon::KEY_LEN]), false),
                 };
-                let frames = themelist::frames(&built.bytes, &key, frame.unwrap_or(themelist::MAX_FRAME));
-                println!("frames ({} writes to {}):", frames.len(), ble::MINI_CHR_LIST);
+                let frames = themelist::frames(&built.bytes, &key, 0, frame.unwrap_or(themelist::MAX_FRAME));
+                println!("frames ({} writes to {}; COMMIT signed against nonce 0 — the real one comes from the watch's status):", frames.len(), ble::MINI_CHR_LIST);
                 for f in &frames {
                     println!("  {:<34} {}", themelist::describe_frame(f), protocol::to_hex(f));
                 }
@@ -528,6 +524,9 @@ async fn main() -> Result<()> {
             let built = themelist::build(&om);
             for (slug, why) in &built.skipped {
                 eprintln!("[themesync] skipping {slug}: {why}");
+            }
+            if let Some((a, b)) = &built.collision {
+                bail!("themes {a:?} and {b:?} share slug crc {:#06x}: a SET could not tell them apart; rename one", beacon::slug_id(a));
             }
             if built.slugs.is_empty() {
                 bail!("no Omarchy themes found");

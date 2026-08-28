@@ -1,14 +1,23 @@
 #!/bin/bash
 # Omarchy theme-set hook -> push the new theme to the watch.
 #
-# Install:  themesync install-hook        (writes this file with the absolute path baked in)
+# Install:  themesync install            (or `themesync install-hook`: writes this file with
+#                                         the absolute path of the binary baked in)
 #     or:   omarchy hook install theme-set hooks/theme-set.d/themesync
 #
 # Omarchy (v4.0.1) runs every ~/.config/omarchy/hooks/theme-set.d/* as `bash <file> <slug>`,
 # synchronously, after the theme directory swap and after all app retints. So this must
 # return immediately: `sync --async` re-execs themesync detached; that process hands the job
-# to the running daemon over its socket (beacon bump + GATT push) or, with no daemon, opens
-# a one-shot GATT connection with retries.
-THEMESYNC="${THEMESYNC_BIN:-themesync}"
-command -v "$THEMESYNC" >/dev/null 2>&1 || exit 0
-"$THEMESYNC" sync --async >/dev/null 2>&1 || true
+# to the running daemon over its socket or, with no daemon, opens a one-shot GATT connection.
+#
+# The session PATH does not include ~/.cargo/bin, so the binary is looked up explicitly.
+# A missing binary is reported once to the journal instead of silently doing nothing.
+for candidate in "${THEMESYNC_BIN:-}" /usr/bin/themesync "$HOME/.cargo/bin/themesync" "$HOME/.local/bin/themesync" themesync; do
+  [ -n "$candidate" ] || continue
+  if command -v "$candidate" >/dev/null 2>&1; then
+    "$candidate" sync --async >/dev/null 2>&1 || true
+    exit 0
+  fi
+done
+echo "themesync hook: no themesync binary found (looked in /usr/bin, ~/.cargo/bin, ~/.local/bin, PATH); the watch will not follow this theme change" | systemd-cat -t themesync -p warning 2>/dev/null || true
+exit 0

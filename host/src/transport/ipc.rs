@@ -56,24 +56,23 @@ impl Reply {
     }
 }
 
-/// `$THEMESYNC_SOCKET`, else `$XDG_RUNTIME_DIR/themesync.sock`, else `/tmp/themesync-<uid>.sock`.
-pub fn socket_path() -> PathBuf {
+/// `$THEMESYNC_SOCKET`, else `$XDG_RUNTIME_DIR/themesync.sock`. No fallback into `/tmp`: a
+/// predictable name in a world-writable directory can be squatted by another local user,
+/// and whoever owns this socket can reset the counter, install a pairing key, or push a
+/// beacon — it must live in a directory only this user can write.
+pub fn socket_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("THEMESYNC_SOCKET") {
-        return PathBuf::from(p);
+        return Ok(PathBuf::from(p));
     }
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join("themesync.sock");
+        return Ok(PathBuf::from(dir).join("themesync.sock"));
     }
-    let uid = std::env::var("UID").ok().unwrap_or_else(|| {
-        // no libc dep: fall back to the login name, which is unique enough for a socket
-        std::env::var("USER").unwrap_or_else(|_| "user".into())
-    });
-    std::env::temp_dir().join(format!("themesync-{uid}.sock"))
+    anyhow::bail!("XDG_RUNTIME_DIR is not set (not a login session?); set THEMESYNC_SOCKET to a path in a directory only you can write")
 }
 
 /// Send one request to a running daemon. `Ok(None)` when no daemon is listening.
 pub async fn request(req: &Request, timeout: Duration) -> Result<Option<Reply>> {
-    let path = socket_path();
+    let path = socket_path()?;
     let stream = match UnixStream::connect(&path).await {
         Ok(s) => s,
         Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {

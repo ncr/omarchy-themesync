@@ -272,7 +272,7 @@ pub const MINI_CHR_COLORS: Uuid = uuid!("7a0e0002-0f0e-4d0c-9c0b-0a0908070605");
 pub const MINI_CHR_NAME: Uuid = uuid!("7a0e0003-0f0e-4d0c-9c0b-0a0908070605");
 /// Pairing key for beacon requests (protocol/BEACON.md §2b): write-only `[0x01][code][key]`.
 pub const MINI_CHR_KEY: Uuid = uuid!("7a0e0005-0f0e-4d0c-9c0b-0a0908070605");
-/// The theme list (protocol/BEACON.md §3): read = 6-byte status, write = BEGIN/DATA/COMMIT frames.
+/// The theme list (protocol/BEACON.md §3): read = 9-byte status (with the transfer nonce), write = BEGIN/DATA/COMMIT frames.
 pub const MINI_CHR_LIST: Uuid = uuid!("7a0e0006-0f0e-4d0c-9c0b-0a0908070605");
 
 /// Connect, write a `colors` packet (13-byte legacy or the firmware's v2 TLV), optionally the
@@ -380,7 +380,8 @@ fn with_att_hint(e: anyhow::Error) -> anyhow::Error {
     e
 }
 
-/// Push the theme list (protocol/BEACON.md §3): read the status, skip when the watch already
+/// Push the theme list (protocol/BEACON.md §3): read the status (it carries the nonce the
+/// COMMIT must be signed against — no readable status, no push), skip when the watch already
 /// holds the same bytes (unless `force`), else BEGIN / DATA… / COMMIT, one write-with-response
 /// each, DATA frames sized to the negotiated MTU (`frame` overrides), then read the status
 /// back to confirm the commit. The peripheral is left connected; the caller disconnects.
@@ -396,21 +397,16 @@ pub async fn push_list(peripheral: &Peripheral, list: &[u8], key: &[u8], force: 
         .find(|c| c.uuid == MINI_CHR_LIST)
         .ok_or_else(|| anyhow!("the watch has no list characteristic {MINI_CHR_LIST} (firmware without the theme list?)"))?;
     let status = match peripheral.read(&chr).await {
-        Ok(b) => match ListStatus::decode(&b) {
-            Ok(s) => Some(s),
-            Err(e) => { log(&format!("list status unreadable ({e}); pushing anyway")); None }
-        },
-        Err(e) => { log(&format!("list status read failed ({e}); pushing anyway")); None }
+        Ok(b) => ListStatus::decode(&b).map_err(|e| anyhow!("the watch's list status does not decode ({e}; {} bytes): firmware without the transfer nonce?", b.len()))?,
+        Err(e) => return Err(anyhow!(e).context("reading the list status (it carries the nonce the COMMIT is signed against)")),
     };
-    if let Some(s) = status {
-        log(&format!("watch list status: {s}"));
-        if !force && s.holds(list) {
-            return Ok(ListPush::Skipped(s));
-        }
+    log(&format!("watch list status: {status}"));
+    if !force && status.holds(list) {
+        return Ok(ListPush::Skipped(status));
     }
     let mtu = peripheral.mtu();
     let frame_len = frame.map(|f| f.clamp(themelist::MIN_FRAME, themelist::MAX_FRAME)).unwrap_or_else(|| themelist::frame_len_for_mtu(mtu));
-    let frames = themelist::frames(list, key, frame_len);
+    let frames = themelist::frames(list, key, status.nonce, frame_len);
     log(&format!("mtu {mtu}: {} bytes in {} writes of <= {frame_len} B", list.len(), frames.len()));
     for f in &frames {
         peripheral

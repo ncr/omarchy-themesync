@@ -33,6 +33,27 @@ pub struct Omarchy {
     /// shell's exports) `~/.local/share/omarchy/themes` when that exists, else
     /// `/usr/share/omarchy/themes`.
     pub system_themes: PathBuf,
+    /// `$OMARCHY_PATH/bin`, same fallbacks: where `omarchy-theme-set` and friends live. The
+    /// daemon starts from the user manager, whose PATH does not include it.
+    pub bin_dir: PathBuf,
+}
+
+/// Where Omarchy's own scripts are, from `$OMARCHY_PATH`, else the two install locations.
+pub fn omarchy_bin_dir() -> PathBuf {
+    if let Some(p) = std::env::var_os("OMARCHY_PATH") {
+        return PathBuf::from(p).join("bin");
+    }
+    let local = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/omarchy/bin"));
+    match local {
+        Some(l) if l.is_dir() => l,
+        _ => PathBuf::from("/usr/share/omarchy/bin"),
+    }
+}
+
+/// `name` as a runnable path: in [`omarchy_bin_dir`] when it exists there, else bare (PATH).
+pub fn omarchy_bin(name: &str) -> PathBuf {
+    let p = omarchy_bin_dir().join(name);
+    if p.is_file() { p } else { PathBuf::from(name) }
 }
 
 impl Omarchy {
@@ -54,6 +75,7 @@ impl Omarchy {
         Omarchy {
             user_themes: home.join(".config/omarchy/themes"),
             system_themes: omarchy_path.join("themes"),
+            bin_dir: omarchy_path.join("bin"),
             current_dir,
             home,
         }
@@ -133,10 +155,12 @@ impl Omarchy {
 
     /// Apply a theme through Omarchy itself, so every app retints and the hooks fire.
     pub fn set_theme(&self, name: &str) -> Result<()> {
-        let status = Command::new("omarchy-theme-set")
+        let bin = self.bin_dir.join("omarchy-theme-set");
+        let bin = if bin.is_file() { bin } else { PathBuf::from("omarchy-theme-set") };
+        let status = Command::new(&bin)
             .arg(name)
             .status()
-            .context("running omarchy-theme-set (is Omarchy on PATH?)")?;
+            .with_context(|| format!("running {} (no Omarchy install found?)", bin.display()))?;
         if !status.success() {
             bail!("omarchy-theme-set {name:?} exited with {status}");
         }
@@ -162,7 +186,7 @@ fn load_via_omarchy_theme_color(path: &Path) -> Result<Option<SourcePalette>> {
     if std::env::var_os("THEMESYNC_NO_OMARCHY_RESOLVER").is_some() {
         return Ok(None);
     }
-    let out = match Command::new("omarchy-theme-color").arg("--file").arg(path).arg("--all").output() {
+    let out = match Command::new(omarchy_bin("omarchy-theme-color")).arg("--file").arg(path).arg("--all").output() {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).context("running omarchy-theme-color"),
