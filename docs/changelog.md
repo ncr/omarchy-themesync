@@ -6,6 +6,13 @@ reviews that shaped v0.1 are `review-2026-08-27.md` (protocol) and
 
 ## Unreleased (v0.1.0 candidate)
 
+- Pairing starts on the watch: its Pair screen advertises `'T' 0x04 <token>`, every desktop
+  in range offers a key + code + its hostname over GATT and shows the code in a
+  notification; the person at the watch picks the desktop and enters its code. The watch
+  keeps up to four pairings and paints from the active one. `themesync pair` still works
+  and now sends the hostname too. The daemon scans even without a key (to see the Pair
+  advertisement).
+
 - The watch sends every request (and retransmission) from a fresh non-resolvable private
   address on its own non-connectable advertising instance, so the controller's duplicate
   filter never hides it: the BlueZ `Experimental = true` step is gone, nothing outside the

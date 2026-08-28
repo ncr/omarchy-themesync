@@ -488,7 +488,8 @@ async fn main() -> Result<()> {
                 Some(r) => bail!("daemon refused the pending key: {}", r.message.unwrap_or_default()),
                 None => bail!("the daemon went away"),
             }
-            let r = ble::write_characteristic(&peripheral, ble::MINI_CHR_KEY, &beacon::encode_pair_write(code, &key)).await;
+            let name = beacon::desktop_name();
+            let r = ble::write_characteristic(&peripheral, ble::MINI_CHR_KEY, &beacon::encode_pair_write(code, &key, &name)).await;
             let _ = btleplug::api::Peripheral::disconnect(&peripheral).await;
             r.context("sending the pairing request to the watch")?;
             println!();
@@ -496,7 +497,8 @@ async fn main() -> Result<()> {
             println!("    │   code  {:X} {:X}   │", code >> 4, code & 0x0f);
             println!("    └──────────────┘");
             println!();
-            println!("enter it on the watch's Pairing screen and confirm.");
+            println!("on the watch's Pairing screen pick \"{name}\", enter the code and confirm.");
+            println!("(the watch can also start this itself: its Pair screen makes every desktop in range offer a code)");
             let deadline = Instant::now() + Duration::from_secs(120);
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;

@@ -50,17 +50,21 @@ with this binary's path, runs `systemctl --user enable --now themesync`, and pri
 
 ## Pair
 
-With the watch nearby:
+Open **Pair** on the watch. Every desktop in range running the daemon answers with an
+offer: a notification shows a two-digit code and the desktop's name. On the watch pick the
+name, enter that code, confirm. The watch answers with a request signed with the new key,
+the daemon makes it the active key and pushes the theme list. A wrong code, or picking
+another desktop, changes nothing here.
+
+The same from the desktop side, without touching the watch's menu:
 
 ```bash
 themesync pair
 ```
 
-The desktop generates a key, writes it to the watch over GATT and prints a two-digit code;
-the watch shows a roller screen. Enter the code, confirm. The watch answers with a request
-signed with the new key, the daemon makes it the active key, and pushes the theme list to
-the watch. A wrong code changes nothing on either side. Re-run `pair` after reflashing the
-watch (it resets the request counter on both ends).
+The watch keeps up to four desktops and paints from the *active* one (its Computers
+screen: tap to switch, hold to forget). Re-pair after reflashing the watch (it resets the
+request counter on both ends).
 
 ## Verify
 

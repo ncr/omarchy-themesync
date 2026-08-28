@@ -287,30 +287,55 @@ The daemon both advertises and scans; the adapter supports that concurrently.
 
 ## 2b. Pairing (the key, confirmed with a code on the watch)
 
+Started on the watch (its Pair screen) or on a desktop (`themesync pair`); either way every
+desktop that takes part *offers* a key, and the person at the watch picks the desktop and
+proves it with that desktop's code. The watch keeps up to 4 pairings and one of them is
+*active*.
+
 ```
-desktop: themesync pair
+watch:   Pair screen → for 60 s its connectable advertisement (static address) also carries
+         manufacturer data 0xFFFF  'T' 0x04 [token u32 le]     6 B, unsigned (no key yet);
+         the token is random per opening of the screen
+desktop: every daemon in range that sees a token it has not answered:
   key  = 16 random bytes,  code = 1 random byte, shown as two hex digits, e.g. "7C"
-  finds the watch by its advertised name (OW-Watch) or the address saved from a previous pairing
-  GATT write to 7a0e0005-…  [0x01][code][key 16 B]        18 bytes, write-only characteristic
-  prints the code, waits (≤ 120 s) for the watch's confirmation
-watch:  on that write → "Pairing" screen: two rollers 0-F (iOS-style wheel), OK
-  entered == code → key → NVS namespace "pair", counter block reset (next request ctr = 1),
-                    then advertise a RESEND request signed with the NEW key, show "paired"
-  entered != code → discard, show "wrong code", back to the previous screen
-  no OK within 120 s → discard
+  GATT write to 7a0e0005-…  [0x01][code][key 16 B][name 0–12 B]    18–30 bytes, write-only;
+                            name = the desktop's hostname (UTF-8, cut on a character boundary)
+  shows the code in a desktop notification ("On the watch pick \"<name>\" and enter 7C");
+  holds the key as *pending* for 120 s (`themesync pair` from the CLI does the same offer,
+  finding the watch by its saved address or its name, without waiting for a 0x04)
+watch:  collects the offers (≤ 4) while the screen is open and lists their names;
+  the user picks one and enters its code on two rollers 0-F
+  entered == code → {name, key} → NVS (up to 4 pairings; a 5th replaces the oldest), it
+                    becomes the active pairing, then a RESEND request signed with the NEW
+                    key, "paired"
+  entered != code → "wrong code", the offer stays until the screen closes
+  screen closed / 60 s → every offer is dropped
 desktop: a §2 request whose MAC verifies with the pending key = confirmation:
   the pending key becomes the active key (~/.config/themesync/key), last counter = that
-  request's ctr, the address `pair` connected to is saved (~/.config/themesync/watch) for
-  list pushes — the request itself comes from a throwaway random address (§2);
-  the old key stays active until then, so a wrong code or a timeout changes nothing.
-  The desktop forgets the pending key 120 s after `pair` handed it over (same window as
-  the watch; it survives a daemon restart inside the window). `pair` needs the daemon: without
-  one nobody can see the confirmation, so the CLI refuses rather than writing an unconfirmed key.
+  request's ctr, the address the offer was written to is saved (~/.config/themesync/watch)
+  for list pushes — the request itself comes from a throwaway random address (§2);
+  the old key stays active until then, so a wrong code, a timeout, or the user picking
+  another desktop changes nothing here. The pending key is forgotten 120 s after the offer
+  (it survives a daemon restart inside the window).
 ```
 
+**Several desktops.** The watch verifies every beacon against every stored key (after the
+crc rule of §1, so only a changed beacon costs a MAC per key) and calls a desktop "in
+range" while its beacon was seen ≤ 3 s ago. It **paints from the active desktop's beacon
+only** and signs its requests with the active key only; a desktop verifies with its own key,
+so the others drop the request on the MAC and nothing else changes. One request counter on
+the watch, shared by all pairings (monotonic; each desktop needs only `ctr > its last`).
+The Computers screen on the watch lists the pairings with an in-range dot and the active
+one; tap = make active (and repaint from its last beacon, if in range); hold = forget.
+
 The code is a confirmation, not key material (8 bits): it proves the person at the watch is
-the person who ran `pair`, and which watch is being paired. The key itself travels over
-GATT. Characteristic `…0005` accepts only this 18-byte form; write-only, not readable.
+the person looking at that desktop's screen, and which watch is being paired. The key itself
+travels over GATT.
+
+A stranger's watch advertising `0x04` makes every desktop in range write an offer to it and
+show a code — a nuisance, not a break: the active key stays until *this* desktop's code is
+entered on that watch, which needs its screen. One offer per token; a desktop remembers
+answered tokens for 5 minutes.
 
 Known weaknesses, accepted for now and listed in §5: the key travels in clear over an
 unencrypted link (a sniffer within range during the pairing window gets it); any central

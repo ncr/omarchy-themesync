@@ -13,6 +13,7 @@
 //! * Until the watch firmware receives beacons, also pushes each change over a one-shot
 //!   GATT connection (`--no-gatt` turns that off).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -305,6 +306,46 @@ pub struct Options {
     pub gatt: bool,
 }
 
+/// Answer the watch's pairing advertisement (BEACON.md §2b): write our offer — the code, the
+/// key, this desktop's name — to the watch at `addr` over GATT and show the code on the
+/// desktop. The pending key was already set by the caller; the watch confirms it (or one of
+/// the other desktops' offers) with a request signed with the key it chose.
+fn pair_offer(opts: BleOptions, addr: String, code: u8, key: Key) {
+    tokio::spawn(async move {
+        let name = beacon::desktop_name();
+        let work = async {
+            let adapter = ble::adapter().await?;
+            let p = ble::discover_by_address(&adapter, &addr, opts.scan_timeout).await?;
+            let r = ble::write_characteristic(&p, ble::MINI_CHR_KEY, &beacon::encode_pair_write(code, &key, &name)).await;
+            let _ = btleplug::api::Peripheral::disconnect(&p).await;
+            r
+        };
+        let code_text = format!("{:X} {:X}", code >> 4, code & 0x0f);
+        match tokio::time::timeout(GATT_TIMEOUT, work).await {
+            Ok(Ok(())) => {
+                log(&format!("pairing: offer written to {addr} as {name:?}; code {code_text}"));
+                notify("Pair with OW-Watch", &format!("On the watch pick \"{name}\" and enter the code  {code_text}"), 90).await;
+            }
+            Ok(Err(e)) => {
+                log(&format!("pairing: offer to {addr} failed: {e:#}"));
+                notify("Pairing with OW-Watch failed", &format!("{e:#}\nTry `themesync pair` with the watch closer."), 15).await;
+            }
+            Err(_) => log(&format!("pairing: offer to {addr} abandoned after {GATT_TIMEOUT:?}")),
+        }
+    });
+}
+
+/// A desktop notification via `notify-send` (libnotify; Omarchy ships it). Best effort.
+async fn notify(summary: &str, body: &str, seconds: u32) {
+    let _ = tokio::process::Command::new("notify-send")
+        .arg("-a").arg("themesync")
+        .arg("-t").arg((seconds * 1000).to_string())
+        .arg(summary).arg(body)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status()
+        .await;
+}
+
 /// Open the radio, waiting (with backoff) for the conditions that clear on their own:
 /// bluetoothd not up, no adapter yet, adapter powered off. A controller that cannot do the
 /// job at all is an error. Logs once per distinct reason, not once per attempt.
@@ -396,7 +437,7 @@ pub async fn run(opts: Options) -> Result<()> {
     let mut key: Option<Key> = beacon::load_key();
     match &key {
         Some(_) => log(&format!("pairing key loaded from {}", beacon::key_path().display())),
-        None => log("no pairing key: no beacon and no request scan until `themesync pair`"),
+        None => log("no pairing key: no beacon until the watch's Pair screen (or `themesync pair`) hands one over"),
     }
     let om = Omarchy::from_env().ok();
     if let Some(om) = &om {
@@ -414,8 +455,8 @@ pub async fn run(opts: Options) -> Result<()> {
     let mut socket_task = tokio::spawn(serve_socket(tx));
 
     // Requests from the air, via a second bluer session (the scan borrows the adapter for
-    // as long as it runs). Only while there is a key to verify them with: without one the
-    // scan would keep the adapter in active discovery for nothing.
+    // as long as it runs). Always on: even without a key the scan is how the watch's
+    // pairing advertisement (§2b) reaches us.
     let (rtx, mut rrx) = mpsc::channel::<(Address, Vec<u8>)>(32);
     let (scan_on_tx, scan_on_rx) = watch::channel(false);
     let monitor_ok: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
@@ -501,7 +542,10 @@ pub async fn run(opts: Options) -> Result<()> {
     let (pushed_tx, mut pushed_rx) = mpsc::channel::<&'static str>(4);
     let list_job = |key: Key, addr: Option<String>, force: bool, reason: &'static str| ListPushJob { opts: opts.ble.clone(), key, addr, force, reason, after: pushed_tx.clone() };
 
-    let _ = scan_on_tx.send(key.is_some() || pending.is_some());
+    let _ = scan_on_tx.send(true);
+    // Pairing advertisements already answered, by token, so the watch's 1 s repeats (and
+    // BlueZ's re-deliveries) produce one offer per Pair screen.
+    let mut pair_tokens: HashMap<u32, Instant> = HashMap::new();
     let mut beacon_up = publish(&mut radio, &theme_wire).await;
     if beacon_up {
         log(&format!("beacon: theme {theme_name} ({} bytes)", theme_wire.len()));
@@ -538,8 +582,7 @@ pub async fn run(opts: Options) -> Result<()> {
                 pending = None;
                 beacon::clear_pending_key();
                 pair_state = if key.is_some() { "paired".into() } else { "no key".into() };
-                log(&format!("pairing: the pending key expired after {} s without a confirmation from the watch; run `themesync pair` again", beacon::PENDING_KEY_TTL.as_secs()));
-                let _ = scan_on_tx.send(key.is_some());
+                log(&format!("pairing: the pending key expired after {} s without a confirmation from the watch", beacon::PENDING_KEY_TTL.as_secs()));
             }
             Some(name) = applied_rx.recv() => {
                 // The watch's SET went through omarchy-theme-set: refresh the beacon from the
@@ -627,7 +670,6 @@ pub async fn run(opts: Options) -> Result<()> {
                                 log(&format!("pairing: could not persist the pending key: {e}"));
                             }
                             pair_state = "pairing pending".into();
-                            let _ = scan_on_tx.send(true);
                             log(&format!("pairing: pending key held for {} s; waiting for a request signed with it", beacon::PENDING_KEY_TTL.as_secs()));
                             Reply::ok("pending")
                         }
@@ -674,6 +716,25 @@ pub async fn run(opts: Options) -> Result<()> {
                 let _ = ipc.reply.send(reply);
             }
             Some((addr, data)) = rrx.recv() => {
+                if let Some(token) = beacon::decode_pair_adv(&data) {
+                    // The watch's Pair screen (BEACON.md §2b): every desktop in range answers
+                    // with its own offer; the watch shows the names and the user enters the
+                    // code of the one they want. One offer per token.
+                    pair_tokens.retain(|_, t| t.elapsed() < Duration::from_secs(300));
+                    if pair_tokens.contains_key(&token) { continue; }
+                    pair_tokens.insert(token, Instant::now());
+                    let (k, code) = match (beacon::new_key(), beacon::new_key()) {
+                        (Ok(k), Ok(c)) => (k, c[0]),
+                        _ => { log("pairing: /dev/urandom unavailable; offer not made"); continue; }
+                    };
+                    pending = Some((k, Instant::now()));
+                    pending_addr = Some(addr.to_string());
+                    if let Err(e) = beacon::save_pending_key(&k) { log(&format!("pairing: could not persist the pending key: {e}")); }
+                    pair_state = format!("pairing pending (offer to {addr}, code {:X} {:X})", code >> 4, code & 0x0f);
+                    log(&format!("pairing: the watch at {addr} asks to pair (token {token:#010x}); offering"));
+                    pair_offer(opts.ble.clone(), addr.to_string(), code, k);
+                    continue;
+                }
                 if data.get(1) != Some(&beacon::KIND_REQUEST) { continue; }
                 if key.is_none() && pending.is_none() { continue; }
                 match beacon::decode_request_with(key.as_ref(), pending.as_ref().map(|(k, _)| k), &data) {

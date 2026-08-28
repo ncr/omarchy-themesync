@@ -13,12 +13,19 @@ pub const MAGIC: u8 = 0x54; // 'T'
 pub const KIND_STATE: u8 = 0x01;
 /// v3 request. v1/v2 requests were kind 0x02 and 10 bytes; a mixed pair fails on the kind.
 pub const KIND_REQUEST: u8 = 0x03;
+/// The watch's "pair with me" advertisement (BEACON.md §2b): `'T' 0x04 [token u32 le]`,
+/// unsigned (there is no key yet), on its connectable advertisement so the address it comes
+/// from is the one to connect to.
+pub const KIND_PAIR: u8 = 0x04;
+pub const PAIR_ADV_LEN: usize = 6;
 pub const REQUEST_LEN: usize = 11;
 pub const MAC_LEN: usize = 4;
 pub const KEY_LEN: usize = 16;
-/// First byte of the `…0005` write: `[0x01][code][key 16]` (protocol/BEACON.md §2b).
+/// First byte of the `…0005` write: `[0x01][code][key 16][name 0–12 B]` (protocol/BEACON.md §2b).
 pub const PAIR_WRITE_TAG: u8 = 0x01;
 pub const PAIR_WRITE_LEN: usize = 2 + KEY_LEN;
+/// The desktop's name in the offer, so the watch can list "which desktop" when several answer.
+pub const PAIR_NAME_MAX: usize = 12;
 /// A pending pairing key is honoured for this long (BEACON.md §2b); the watch's own window
 /// is the same.
 pub const PENDING_KEY_TTL: std::time::Duration = std::time::Duration::from_secs(120);
@@ -45,13 +52,40 @@ pub fn check_theme(theme: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// The 18-byte pairing write.
-pub fn encode_pair_write(code: u8, key: &[u8; KEY_LEN]) -> [u8; PAIR_WRITE_LEN] {
-    let mut b = [0u8; PAIR_WRITE_LEN];
-    b[0] = PAIR_WRITE_TAG;
-    b[1] = code;
-    b[2..].copy_from_slice(key);
+/// The pairing offer written to the watch: 18 bytes plus the desktop's name (cut to
+/// [`PAIR_NAME_MAX`] bytes on a character boundary).
+pub fn encode_pair_write(code: u8, key: &[u8; KEY_LEN], name: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(PAIR_WRITE_LEN + PAIR_NAME_MAX);
+    b.push(PAIR_WRITE_TAG);
+    b.push(code);
+    b.extend_from_slice(key);
+    let mut n = 0;
+    for ch in name.chars() {
+        if n + ch.len_utf8() > PAIR_NAME_MAX {
+            break;
+        }
+        n += ch.len_utf8();
+    }
+    b.extend_from_slice(&name.as_bytes()[..n]);
     b
+}
+
+/// The token of a `'T' 0x04` pairing advertisement, if `b` is one.
+pub fn decode_pair_adv(b: &[u8]) -> Option<u32> {
+    if b.len() != PAIR_ADV_LEN || b[0] != MAGIC || b[1] != KIND_PAIR {
+        return None;
+    }
+    Some(u32::from_le_bytes([b[2], b[3], b[4], b[5]]))
+}
+
+/// This desktop's name for the pairing offer: the hostname, else "desktop".
+pub fn desktop_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "desktop".into())
 }
 
 /// Which key a request verified with.
@@ -255,9 +289,9 @@ pub fn judge_ctr(ctr: u16, last: u16, locked: bool) -> CtrVerdict {
     }
 }
 
-/// True for any packet of ours (either kind), so the scanner can skip other 0xFFFF users.
+/// True for any packet of ours (any kind), so the scanner can skip other 0xFFFF users.
 pub fn is_ours(b: &[u8]) -> bool {
-    b.len() >= 2 && b[0] == MAGIC && (b[1] == KIND_STATE || b[1] == KIND_REQUEST)
+    b.len() >= 2 && b[0] == MAGIC && (b[1] == KIND_STATE || b[1] == KIND_REQUEST || b[1] == KIND_PAIR)
 }
 
 /// The `arg` of a `Set` request.
@@ -457,10 +491,19 @@ mod tests {
         assert_eq!(decode_request_with(Some(&old), None, &with_new), Err(RequestError::BadMac));
         assert_eq!(decode_request_with(None, Some(&new), &with_new).unwrap().1, Verified::Pending);
         assert_eq!(decode_request_with(None, None, &with_new), Err(RequestError::BadMac));
-        let w = encode_pair_write(0x7C, &new);
+        let w = encode_pair_write(0x7C, &new, "");
         assert_eq!(w.len(), PAIR_WRITE_LEN);
         assert_eq!(&w[..2], &[PAIR_WRITE_TAG, 0x7C]);
         assert_eq!(&w[2..], &new);
+        let named = encode_pair_write(0x7C, &new, "spawner");
+        assert_eq!(&named[PAIR_WRITE_LEN..], b"spawner");
+        let long = encode_pair_write(0x7C, &new, "żółw-na-biurku-xyz");
+        assert!(long.len() <= PAIR_WRITE_LEN + PAIR_NAME_MAX);
+        assert!(std::str::from_utf8(&long[PAIR_WRITE_LEN..]).is_ok(), "cut on a character boundary");
+        assert_eq!(decode_pair_adv(&[MAGIC, KIND_PAIR, 0x78, 0x56, 0x34, 0x12]), Some(0x1234_5678));
+        assert_eq!(decode_pair_adv(&[MAGIC, KIND_PAIR, 0x78, 0x56, 0x34]), None);
+        assert_eq!(decode_pair_adv(&[MAGIC, KIND_REQUEST, 0, 0, 0, 0]), None);
+        assert!(is_ours(&[MAGIC, KIND_PAIR, 0, 0, 0, 0]));
     }
 
     #[test]
