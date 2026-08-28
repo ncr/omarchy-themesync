@@ -312,6 +312,11 @@ pub async fn write_characteristic(peripheral: &Peripheral, uuid: Uuid, value: &[
 /// addresses, so there this never matches and callers fall back to [`discover_service`].
 pub async fn discover_by_address(adapter: &Adapter, addr: &str, timeout: Duration) -> Result<Peripheral> {
     let want = addr.to_ascii_uppercase();
+    // BlueZ usually knows the watch already (it advertises every second and the daemon
+    // scans): take it from the object list before starting a scan of our own.
+    if let Some(p) = adapter.peripherals().await.unwrap_or_default().into_iter().find(|p| p.address().to_string().to_ascii_uppercase() == want) {
+        return Ok(p);
+    }
     adapter.start_scan(ScanFilter::default()).await.context("starting BLE scan (is Bluetooth powered on?)")?;
     let deadline = Instant::now() + timeout;
     let result = loop {
