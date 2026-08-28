@@ -6,6 +6,13 @@ reviews that shaped v0.1 are `review-2026-08-27.md` (protocol) and
 
 ## Unreleased (v0.1.0 candidate)
 
+- A widget for the Omarchy bar (`shell/io.github.ncr.themesync`): a watch mark that is lit
+  while the beacon is on the air and a watch is paired, red when the daemon needs a person;
+  its panel shows the daemon's state and sends the theme or the theme list again. It talks
+  to the daemon over the socket (no binary on the shell's PATH). `themesync install` writes
+  it to `~/.config/omarchy/plugins/` and enables it (`--no-bar` to skip), `uninstall`
+  removes it, `doctor` reports it.
+
 - Pairing starts on the watch: its Pair screen advertises `'T' 0x04 <token>`, every desktop
   in range offers a key + code + its hostname over GATT and shows the code in a
   notification; the person at the watch picks the desktop and enters its code. The watch

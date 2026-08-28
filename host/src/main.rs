@@ -194,19 +194,22 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Write the systemd user unit and the Omarchy hook for this binary, enable the service, run `doctor`.
+    /// Write the systemd user unit, the Omarchy hook and the bar widget for this binary, enable the service, run `doctor`.
     Install {
         /// Write the files only; do not enable or start the service.
         #[arg(long)]
         no_enable: bool,
+        /// Leave the Omarchy bar alone (no widget in ~/.config/omarchy/plugins).
+        #[arg(long)]
+        no_bar: bool,
     },
-    /// Stop and disable the service, remove the unit and the hook (keeps ~/.config/themesync unless --purge).
+    /// Stop and disable the service, remove the unit, the hook and the bar widget (keeps ~/.config/themesync unless --purge).
     Uninstall {
         /// Also delete ~/.config/themesync (the pairing key, the counter, the watch's address).
         #[arg(long)]
         purge: bool,
     },
-    /// Check everything the daemon needs: Omarchy, BlueZ, the controller, the unit, the hook, the key.
+    /// Check everything the daemon needs: Omarchy, BlueZ, the controller, the unit, the hook, the bar widget, the key.
     Doctor,
     /// Forget the last accepted request counter (BEACON.md §2): after the watch was
     /// reflashed and counts from 1 again. Prefer `themesync pair`, which resets both sides.
@@ -682,7 +685,7 @@ async fn main() -> Result<()> {
             bail!("the Omarchy hook is a Linux thing");
         }
         #[cfg(target_os = "linux")]
-        Cmd::Install { no_enable } => setup::install(!no_enable).await?,
+        Cmd::Install { no_enable, no_bar } => setup::install(!no_enable, !no_bar).await?,
         #[cfg(target_os = "linux")]
         Cmd::Uninstall { purge } => setup::uninstall(purge)?,
         #[cfg(target_os = "linux")]

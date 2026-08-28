@@ -36,7 +36,7 @@ From source (Rust stable ≥ 1.85):
 ```bash
 git clone https://github.com/ncr/omarchy-themesync && cd omarchy-themesync
 cargo install --path host --locked          # → ~/.cargo/bin/themesync
-themesync install                           # hook + user service, then a health check
+themesync install                           # hook + user service + bar widget, then a health check
 ```
 
 As a package: `packaging/PKGBUILD` (`cd packaging && makepkg -si`); the package puts the
@@ -46,7 +46,25 @@ lists the same per-user steps: `themesync install`, then `themesync pair`.
 `themesync install` writes `~/.config/omarchy/hooks/theme-set.d/themesync` (the Omarchy
 hook that tells the daemon about a theme change) and `~/.config/systemd/user/themesync.service`
 with this binary's path, runs `systemctl --user enable --now themesync`, and prints the
-`doctor` report.
+`doctor` report. It also puts a widget in the Omarchy bar (below); `--no-bar` skips that.
+
+### The bar widget
+
+`themesync install` copies `shell/io.github.ncr.themesync` (carried inside the binary) to
+`~/.config/omarchy/plugins/io.github.ncr.themesync/` and enables it in the right section of
+the bar — the only place Omarchy loads third-party widgets from, so a package cannot do it.
+
+The bar shows one watch mark: lit while the beacon is on the air and a watch is paired,
+dimmed while there is nothing to show (no daemon, no key), red when the daemon needs you
+(counter locked, beacon registration failing). Click it for the panel: pairing, the
+watch's address, its last request and counter, when the theme list was pushed, the beacon
+and scan state, the hook — and two buttons, **Send theme** (`S`, or right-click the mark)
+and **Push theme list** (`L`); **Reset counter** appears only while the counter is locked.
+The widget talks to the daemon over its socket every 10 s (a setting in the bar's widget
+editor, with "hide while the daemon is not running").
+
+Move it with `omarchy bar move io.github.ncr.themesync`, take it out with
+`omarchy plugin disable io.github.ncr.themesync`; `themesync uninstall` removes it.
 
 ## Pair
 
@@ -70,7 +88,7 @@ request counter on both ends).
 
 ```bash
 themesync status          # daemon, beacon, scan, watch, counter, last list push
-themesync doctor          # Omarchy, BlueZ, controller, unit, hook, key — with the fix for each problem
+themesync doctor          # Omarchy, BlueZ, controller, unit, hook, bar widget, key — with the fix for each problem
 journalctl --user -u themesync -f
 ```
 
@@ -113,7 +131,7 @@ so its swipes cannot be tracked. Stop the service when that is not what you want
 ## Uninstall
 
 ```bash
-themesync uninstall          # stops and disables the service, removes the unit and the hook
+themesync uninstall          # stops and disables the service, removes the unit, the hook and the bar widget
 themesync uninstall --purge  # also deletes ~/.config/themesync (the pairing key)
 cargo uninstall omarchy-themesync   # or pacman -R omarchy-themesync
 ```
@@ -160,6 +178,7 @@ protocol/THEME_PROTOCOL.md   Theme Protocol v1 (historical: not on any device)
 watch/                       v1-era C reference (decoder, ESP32/LVGL modules, simulator) — historical;
                              the real firmware lives in github.com/ncr/onewheel
 hooks/theme-set.d/themesync  the Omarchy hook (what `themesync install` writes, with an explicit binary search)
+shell/io.github.ncr.themesync  the Omarchy bar widget (Quickshell QML + manifest; `themesync install` writes it)
 systemd/themesync.service    the packaged user unit
 packaging/                   PKGBUILD + .install
 docs/                        changelog, the two reviews, omarchy.md (Omarchy internals verified), palette-mapping.md, prior-art.md, hardware.md

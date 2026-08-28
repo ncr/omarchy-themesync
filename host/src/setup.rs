@@ -1,6 +1,7 @@
 //! `themesync install` / `uninstall` / `doctor`: the parts of a release that a package cannot
-//! do for one user — the systemd user unit, the Omarchy hook, and a diagnosis of everything
-//! the daemon depends on (Omarchy, BlueZ, the controller, the unit, the key).
+//! do for one user — the systemd user unit, the Omarchy hook, the bar widget, and a
+//! diagnosis of everything the daemon depends on (Omarchy, BlueZ, the controller, the unit,
+//! the key).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +16,15 @@ pub const UNIT_NAME: &str = "themesync.service";
 /// Where a package installs the unit; `install` then only enables it.
 pub const PACKAGED_UNIT: &str = "/usr/lib/systemd/user/themesync.service";
 pub const PACKAGED_BIN: &str = "/usr/bin/themesync";
+
+/// The Omarchy bar widget (`shell/io.github.ncr.themesync` in the repo), carried inside
+/// the binary so `install` can write it: Omarchy loads third-party widgets only from
+/// `~/.config/omarchy/plugins/<id>/`, and a package must not write there.
+pub const BAR_PLUGIN_ID: &str = "io.github.ncr.themesync";
+const BAR_FILES: [(&str, &str); 2] = [
+    ("manifest.json", include_str!("../../shell/io.github.ncr.themesync/manifest.json")),
+    ("Panel.qml", include_str!("../../shell/io.github.ncr.themesync/Panel.qml")),
+];
 
 fn home() -> Result<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")
@@ -67,6 +77,112 @@ pub fn hook_text(exe: &Path) -> String {
     )
 }
 
+pub fn bar_plugin_dir() -> Result<PathBuf> {
+    Ok(home()?.join(".config/omarchy/plugins").join(BAR_PLUGIN_ID))
+}
+
+fn shell_json_path() -> Result<PathBuf> {
+    Ok(home()?.join(".config/omarchy/shell.json"))
+}
+
+/// Whether the widget sits in the bar layout of `~/.config/omarchy/shell.json` (that is what
+/// "enabled" means for a bar widget). `None` when there is no readable file.
+fn bar_widget_in_layout() -> Option<bool> {
+    let text = std::fs::read_to_string(shell_json_path().ok()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let layout = v.get("bar")?.get("layout")?.as_object()?;
+    Some(layout.values().filter_map(|s| s.as_array()).flatten().any(|m| m.get("id").and_then(|i| i.as_str()) == Some(BAR_PLUGIN_ID)))
+}
+
+/// How the installed widget compares with the one in this binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarFiles {
+    Missing,
+    /// A symlink (a checkout of the repo): left alone, Omarchy's validator rejects it anyway.
+    Symlink,
+    Current,
+    Different,
+}
+
+fn bar_files_state(dir: &Path) -> BarFiles {
+    if std::fs::symlink_metadata(dir).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return BarFiles::Symlink;
+    }
+    if !dir.is_dir() {
+        return BarFiles::Missing;
+    }
+    let same = BAR_FILES.iter().all(|(name, text)| std::fs::read_to_string(dir.join(name)).map(|t| t == *text).unwrap_or(false));
+    if same { BarFiles::Current } else { BarFiles::Different }
+}
+
+/// Run one of Omarchy's scripts; `Ok(None)` when it is not there (an older Omarchy).
+fn omarchy_cmd(om: &Omarchy, name: &str, args: &[&str]) -> Result<Option<std::process::Output>> {
+    let p = om.bin_dir.join(name);
+    if !p.is_file() {
+        return Ok(None);
+    }
+    Command::new(&p).args(args).output().map(Some).with_context(|| format!("running {}", p.display()))
+}
+
+/// Write the widget's files and put it in the bar (once): rescan so the shell sees the
+/// files, enable if the layout does not have it yet. The shell not running is not an
+/// error — it picks the plugin up at its next start.
+pub fn install_bar(om: &Omarchy) -> Result<()> {
+    if !om.bin_dir.join("omarchy-shell").is_file() {
+        println!("bar       skipped: no omarchy-shell in {} (the widget needs Omarchy's Quickshell bar)", om.bin_dir.display());
+        return Ok(());
+    }
+    let dir = bar_plugin_dir()?;
+    let state = bar_files_state(&dir);
+    match state {
+        BarFiles::Symlink => println!("bar       {} is a symlink, left as it is", dir.display()),
+        BarFiles::Current => println!("bar       {} (up to date)", dir.display()),
+        BarFiles::Missing | BarFiles::Different => {
+            std::fs::create_dir_all(&dir)?;
+            for (name, text) in BAR_FILES {
+                std::fs::write(dir.join(name), text)?;
+            }
+            println!("bar       {}", dir.display());
+        }
+    }
+    if state != BarFiles::Current {
+        match omarchy_cmd(om, "omarchy-shell", &["shell", "rescanPlugins"])? {
+            // The shell keeps the QML it compiled at start: a rescan shows it new plugins,
+            // not new versions of a loaded one.
+            Some(o) if o.status.success() && state == BarFiles::Different => println!("bar       files updated; `omarchy restart shell` loads them (the shell keeps the old copy until then)"),
+            Some(o) if o.status.success() => {}
+            Some(_) => println!("bar       the shell is not running; it will see the widget at its next start"),
+            None => {}
+        }
+    }
+    if bar_widget_in_layout() == Some(true) {
+        println!("bar       in the bar already (omarchy bar move {BAR_PLUGIN_ID} to move it)");
+        return Ok(());
+    }
+    match omarchy_cmd(om, "omarchy-plugin-enable", &[BAR_PLUGIN_ID])? {
+        Some(o) if o.status.success() => println!("bar       enabled, in the right section (omarchy plugin disable {BAR_PLUGIN_ID} removes it)"),
+        Some(o) => println!("bar       not enabled: {} → omarchy plugin enable {BAR_PLUGIN_ID}", String::from_utf8_lossy(&o.stderr).trim()),
+        None => println!("bar       enable it with: omarchy plugin enable {BAR_PLUGIN_ID}"),
+    }
+    Ok(())
+}
+
+/// Take the widget out of the bar and delete its files.
+pub fn uninstall_bar(om: &Omarchy) -> Result<()> {
+    let dir = bar_plugin_dir()?;
+    if bar_widget_in_layout() == Some(true) {
+        let _ = omarchy_cmd(om, "omarchy-plugin-disable", &[BAR_PLUGIN_ID]);
+    }
+    match bar_files_state(&dir) {
+        BarFiles::Missing => return Ok(()),
+        BarFiles::Symlink => std::fs::remove_file(&dir)?,
+        _ => std::fs::remove_dir_all(&dir)?,
+    }
+    let _ = omarchy_cmd(om, "omarchy-shell", &["shell", "rescanPlugins"]);
+    println!("bar       removed {}", dir.display());
+    Ok(())
+}
+
 fn systemctl(args: &[&str]) -> Result<std::process::Output> {
     Command::new("systemctl").arg("--user").args(args).output().context("running systemctl --user")
 }
@@ -92,12 +208,16 @@ pub fn install_hook(om: &Omarchy, exe: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Unit + hook + enable, then the doctor. `enable = false` writes the files only.
-pub async fn install(enable: bool) -> Result<()> {
+/// Unit + hook + bar widget + enable, then the doctor. `enable = false` writes the files
+/// only; `bar = false` leaves the Omarchy bar alone.
+pub async fn install(enable: bool, bar: bool) -> Result<()> {
     let exe = current_exe()?;
     let om = Omarchy::from_env().context("no Omarchy install found")?;
     let hook = install_hook(&om, &exe)?;
     println!("hook      {}", hook.display());
+    if bar {
+        install_bar(&om)?;
+    }
 
     let packaged = exe == Path::new(PACKAGED_BIN) && Path::new(PACKAGED_UNIT).is_file();
     let user_unit = user_unit_path()?;
@@ -137,7 +257,7 @@ pub async fn install(enable: bool) -> Result<()> {
     Ok(())
 }
 
-/// Disable + stop the service, remove the unit (if it is the user copy) and the hook.
+/// Disable + stop the service, remove the unit (if it is the user copy), the hook and the bar widget.
 /// `purge` also removes `~/.config/themesync` (the pairing key, the counter, the watch's
 /// address).
 pub fn uninstall(purge: bool) -> Result<()> {
@@ -157,6 +277,7 @@ pub fn uninstall(purge: bool) -> Result<()> {
             std::fs::remove_file(&hook)?;
             println!("hook      removed {}", hook.display());
         }
+        uninstall_bar(&om)?;
     }
     if let Some(sock) = ipc::socket_path().ok().filter(|p| p.exists()) {
         let _ = std::fs::remove_file(sock);
@@ -237,6 +358,30 @@ fn bluetooth_conf_experimental() -> Option<bool> {
     Some(value.unwrap_or(false))
 }
 
+/// The bar widget: optional, so never a failure.
+fn bar_check(om: &Omarchy) -> Check {
+    if !om.bin_dir.join("omarchy-shell").is_file() {
+        return Check::warn("bar", "no omarchy-shell in this Omarchy (the widget needs its Quickshell bar)", "optional: the daemon works without the bar widget");
+    }
+    let dir = match bar_plugin_dir() {
+        Ok(d) => d,
+        Err(e) => return Check::warn("bar", format!("{e:#}"), ""),
+    };
+    let placed = bar_widget_in_layout();
+    let placement = match placed {
+        Some(true) => "in the bar",
+        Some(false) => "not in the bar",
+        None => "no ~/.config/omarchy/shell.json yet",
+    };
+    match bar_files_state(&dir) {
+        BarFiles::Missing => Check::warn("bar", "widget not installed", "themesync install (optional)"),
+        BarFiles::Different => Check::warn("bar", format!("{}: files from another version, {placement}", dir.display()), "themesync install"),
+        BarFiles::Symlink if placed == Some(true) => Check::ok("bar", format!("{} (symlink), {placement}", dir.display())),
+        BarFiles::Current if placed == Some(true) => Check::ok("bar", format!("{}, {placement}", dir.display())),
+        _ => Check::warn("bar", format!("{}, {placement}", dir.display()), format!("omarchy plugin enable {BAR_PLUGIN_ID}")),
+    }
+}
+
 /// Everything the daemon depends on, checked from the outside. Read-only.
 pub async fn doctor() -> Report {
     let mut c = Vec::new();
@@ -270,6 +415,7 @@ pub async fn doctor() -> Report {
                 }
                 Err(_) => c.push(Check::fail("hook", format!("no hook at {}", hook.display()), "themesync install — without it desktop-side theme changes never reach the watch")),
             }
+            c.push(bar_check(&om));
         }
         Err(e) => c.push(Check::fail("omarchy", format!("{e:#}"), "themesync is for Omarchy (https://omarchy.org); set OMARCHY_PATH if it is installed elsewhere")),
     }

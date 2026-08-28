@@ -3,7 +3,7 @@ post_install() {
 omarchy-themesync: two per-user steps a package cannot do for you (nothing needs root):
 
   1. As your desktop user, inside the Omarchy session:
-        themesync install      # hook + user service, then a health check
+        themesync install      # hook + user service + bar widget, then a health check
   2. With the watch nearby:
         themesync pair
 
