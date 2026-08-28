@@ -1,0 +1,42 @@
+# Maintainer: Jacek Becela <jacek.becela@gmail.com>
+# Not yet on the AUR: `makepkg -si` from this directory builds it from a release tarball.
+pkgname=omarchy-themesync
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="The Omarchy desktop theme on your smartwatch over BLE, both ways (beacon daemon + CLI)"
+arch=(x86_64 aarch64)
+url="https://github.com/ncr/omarchy-themesync"
+license=(MIT)
+# ldd: libdbus-1.so.3 (bluer), libsystemd.so.0 (journal); bluetoothd at runtime.
+depends=(bluez dbus systemd-libs)
+optdepends=('omarchy: the desktop whose theme is pushed (the daemon needs it; the codecs do not)'
+            'bluez-utils: bluetoothctl and btmon for debugging')
+makedepends=(cargo git)
+install=$pkgname.install
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$srcdir/$pkgname-$pkgver/host"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver/host"
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$srcdir/$pkgname-$pkgver/host"
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  install -Dm755 host/target/release/themesync "$pkgdir/usr/bin/themesync"
+  install -Dm644 systemd/themesync.service     "$pkgdir/usr/lib/systemd/user/themesync.service"
+  install -Dm644 LICENSE                       "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md                     "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 protocol/BEACON.md            "$pkgdir/usr/share/doc/$pkgname/BEACON.md"
+}

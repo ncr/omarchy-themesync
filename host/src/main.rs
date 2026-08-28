@@ -9,7 +9,9 @@
 //! themesync daemon [--no-gatt]                                  state beacon + request scanner (protocol/BEACON.md)
 //! themesync pair                                                pairing key for beacon requests
 //! themesync push-list [--force] [--dry-run] [--direct]          the theme list over GATT (protocol/BEACON.md §3)
-//! themesync scan / status / reset-counter / install-hook
+//! themesync install [--no-enable] / uninstall [--purge] / doctor   unit + hook + diagnosis
+//! themesync status [--json] / reset-counter / install-hook
+//! themesync scan / encode / decode / demo                         Theme Protocol v1 tooling (hidden)
 //! ```
 
 // The beacon/request helpers are only called by the daemon, which is Linux-only.
@@ -21,6 +23,8 @@ mod daemon;
 mod omarchy;
 mod palette;
 mod protocol;
+#[cfg(target_os = "linux")]
+mod setup;
 mod themelist;
 mod transport;
 
@@ -37,8 +41,13 @@ use transport::ble::{self, BleOptions};
 use transport::ipc::{self, Reply, Request};
 use transport::sim::{self, SimWatch};
 
+#[cfg(target_os = "linux")]
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (beacon v3, list status v2)");
+#[cfg(not(target_os = "linux"))]
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (GATT only on this OS)");
+
 #[derive(Parser)]
-#[command(name = "themesync", version, about = "Push the Omarchy desktop theme to external devices (smartwatch over BLE first)")]
+#[command(name = "themesync", version = VERSION, about = "Push the Omarchy desktop theme to a smartwatch over BLE")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -88,7 +97,8 @@ enum Cmd {
         #[arg(long)]
         contrast: bool,
     },
-    /// Serialize the active theme as a Theme Protocol v1 packet.
+    /// Serialize the active theme as a Theme Protocol v1 packet (no device speaks v1).
+    #[command(hide = true)]
     Encode {
         #[command(flatten)]
         src: ThemeSource,
@@ -99,14 +109,16 @@ enum Cmd {
         #[arg(long)]
         raw: bool,
     },
-    /// Decode a packet the way the watch does and print the resulting palette.
+    /// Decode a Theme Protocol v1 packet the way a v1 receiver would.
+    #[command(hide = true)]
     Decode {
         /// Hex string, or `-` to read hex from stdin.
         packet: String,
         #[arg(long)]
         json: bool,
     },
-    /// Run the whole chain without hardware: resolve -> map -> encode -> simulated watch.
+    /// Run the v1 chain without hardware: resolve -> map -> encode -> simulated watch.
+    #[command(hide = true)]
     Demo {
         #[command(flatten)]
         src: ThemeSource,
@@ -168,16 +180,34 @@ enum Cmd {
         #[arg(long, default_value_t = 3)]
         retries: u32,
     },
-    /// List nearby BLE devices, flagging the ones advertising the Theme service.
+    /// List nearby BLE devices, flagging the ones advertising the Theme Protocol v1 service.
+    #[command(hide = true)]
     Scan {
         #[command(flatten)]
         ble: BleArgs,
     },
-    /// Read the watch's Info/Status characteristics (and the daemon's state).
+    /// The daemon's state: pairing, beacon, scan, counter, last request, last list push.
     Status {
         #[command(flatten)]
         ble: BleArgs,
+        /// The daemon's reply as JSON (for scripts and the bar widget).
+        #[arg(long)]
+        json: bool,
     },
+    /// Write the systemd user unit and the Omarchy hook for this binary, enable the service, run `doctor`.
+    Install {
+        /// Write the files only; do not enable or start the service.
+        #[arg(long)]
+        no_enable: bool,
+    },
+    /// Stop and disable the service, remove the unit and the hook (keeps ~/.config/themesync unless --purge).
+    Uninstall {
+        /// Also delete ~/.config/themesync (the pairing key, the counter, the watch's address).
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Check everything the daemon needs: Omarchy, BlueZ, the controller, the unit, the hook, the key.
+    Doctor,
     /// Forget the last accepted request counter (BEACON.md §2): after the watch was
     /// reflashed and counts from 1 again. Prefer `themesync pair`, which resets both sides.
     ResetCounter,
@@ -198,17 +228,15 @@ fn use_ansi() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
+#[cfg(target_os = "linux")]
 fn hook_script() -> String {
-    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "themesync".into());
-    format!(
-        "#!/bin/bash\n\
-         # Omarchy theme-set hook: push the new theme to the watch. Installed by `themesync install-hook`.\n\
-         # Omarchy runs this synchronously (bash <file> <theme-slug>) after the theme directory swap\n\
-         # and all app retints, so return fast: the daemon (or a background one-shot) does the BLE work.\n\
-         THEMESYNC=\"${{THEMESYNC_BIN:-{exe}}}\"\n\
-         command -v \"$THEMESYNC\" >/dev/null 2>&1 || THEMESYNC=themesync\n\
-         \"$THEMESYNC\" sync --async >/dev/null 2>&1 || true\n"
-    )
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("themesync"));
+    setup::hook_text(&exe)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hook_script() -> String {
+    "#!/bin/bash\n# the Omarchy hook is a Linux thing; see `themesync install` there\n".into()
 }
 
 async fn sync_via_daemon(src: &ThemeSource) -> Result<Option<Reply>> {
@@ -560,19 +588,38 @@ async fn main() -> Result<()> {
             }
             println!("(* = advertises the Theme service {})", ble::SERVICE_UUID);
         }
-        Cmd::Status { ble } => {
+        Cmd::Status { ble, json } => {
             if let Some(r) = ipc::request(&Request::Status, Duration::from_secs(10)).await? {
-                println!("daemon: {} {}", if r.ok { "ok" } else { "error" }, r.message.unwrap_or_default());
-                if let Some(w) = r.watch {
-                    println!("watch:  {w}");
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&r)?);
+                    return Ok(());
                 }
-                if let Some(t) = r.theme {
-                    println!("theme:  {t}");
+                match &r.info {
+                    Some(i) => {
+                        println!("daemon:   running, {} ({})", i.pairing, i.protocol);
+                        println!("beacon:   {}{}", match i.beacon.as_str() { "on" => "on the air", "idle" => "idle (nothing to send)", _ => "OFF THE AIR — journalctl --user -u themesync" }, if i.theme.is_empty() { String::new() } else { format!(", theme {}", i.theme) });
+                        println!("scan:     {}", match i.scan.as_str() { "on" => "on".to_string(), "off" => "off (no pairing key)".into(), "starting" => "starting".into(), _ => "on, WITHOUT the advertisement monitor: requests slow or lost (BlueZ Experimental = true fixes it)".into() });
+                        println!("watch:    {}{}", i.watch.as_deref().unwrap_or("unknown"), i.last_request.as_ref().map(|r| format!(", last request {r}")).unwrap_or_default());
+                        println!("counter:  last accepted #{}{}{}", i.ctr_last, if i.ctr_locked { " — LOCKED (counter file unreadable): themesync reset-counter" } else { "" }, if i.stale_rejected > 0 { format!(", {} stale request(s) rejected", i.stale_rejected) } else { String::new() });
+                        println!("list:     {}", i.list_push);
+                        if !i.hook_installed {
+                            println!("hook:     NOT installed — desktop-side theme changes will not reach the watch (themesync install)");
+                        }
+                    }
+                    None => {
+                        println!("daemon: {} {}", if r.ok { "ok" } else { "error" }, r.message.unwrap_or_default());
+                        if let Some(w) = r.watch { println!("watch:  {w}"); }
+                        if let Some(t) = r.theme { println!("theme:  {t}"); }
+                    }
                 }
                 return Ok(());
             }
+            if json {
+                println!("{}", serde_json::to_string(&Reply::err("daemon not running"))?);
+                return Ok(());
+            }
             if ble.name.is_none() {
-                println!("daemon: not running (systemctl --user status themesync); pass --name to query a Theme Protocol v1 device over GATT instead");
+                println!("daemon: not running (systemctl --user status themesync, or `themesync install`); pass --name to query a Theme Protocol v1 device over GATT instead");
                 return Ok(());
             }
             let adapter = ble::adapter().await?;
@@ -610,19 +657,30 @@ async fn main() -> Result<()> {
                 print!("{script}");
                 return Ok(());
             }
-            let om = Omarchy::from_env()?;
-            let dir = om.hooks_dir();
-            std::fs::create_dir_all(&dir)?;
-            let path = dir.join("themesync");
-            std::fs::write(&path, script)?;
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+                let om = Omarchy::from_env()?;
+                let path = setup::install_hook(&om, &std::env::current_exe()?)?;
+                println!("installed {}", path.display());
+                println!("Omarchy will run it as `bash {} <theme-slug>` after every theme change.", path.display());
             }
-            println!("installed {}", path.display());
-            println!("Omarchy will run it as `bash {} <theme-slug>` after every theme change.", path.display());
+            #[cfg(not(target_os = "linux"))]
+            bail!("the Omarchy hook is a Linux thing");
         }
+        #[cfg(target_os = "linux")]
+        Cmd::Install { no_enable } => setup::install(!no_enable).await?,
+        #[cfg(target_os = "linux")]
+        Cmd::Uninstall { purge } => setup::uninstall(purge)?,
+        #[cfg(target_os = "linux")]
+        Cmd::Doctor => {
+            let report = setup::doctor().await;
+            print!("{}", report.render());
+            if report.failed() {
+                std::process::exit(1);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        Cmd::Install { .. } | Cmd::Uninstall { .. } | Cmd::Doctor => bail!("install/uninstall/doctor are for the Linux daemon"),
     }
     Ok(())
 }

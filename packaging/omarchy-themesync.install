@@ -1,0 +1,30 @@
+post_install() {
+  cat <<'EOF'
+omarchy-themesync: three per-user steps a package cannot do for you:
+
+  1. BlueZ must expose the advertisement monitor (requests from the watch are slow or lost
+     without it). As root, once:
+        sed -i 's/^#\?Experimental *=.*/Experimental = true/' /etc/bluetooth/main.conf
+        systemctl restart bluetooth
+  2. As your desktop user, inside the Omarchy session:
+        themesync install      # hook + user service, then a health check
+  3. With the watch nearby:
+        themesync pair
+
+  `themesync doctor` checks all of it. Docs: /usr/share/doc/omarchy-themesync/README.md
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+omarchy-themesync: run `themesync doctor` as your desktop user; `systemctl --user restart themesync`
+picks up the new binary.
+EOF
+}
+
+pre_remove() {
+  cat <<'EOF'
+omarchy-themesync: per-user leftovers are removed with `themesync uninstall` (add --purge to
+delete the pairing key in ~/.config/themesync); run it before this package is gone.
+EOF
+}

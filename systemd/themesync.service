@@ -1,8 +1,9 @@
 # User service: broadcast the current Omarchy theme as a BLE beacon, scan for the watch's
 # requests, and serve the hook's `sync` over the daemon socket (protocol/BEACON.md).
 #
-#   themesync install            writes this unit (with the binary's real path) and the hook,
-#                                then enables the service
+# This is the packaged copy (/usr/lib/systemd/user, binary at /usr/bin). For a cargo-installed
+# binary `themesync install` writes the same unit with the binary's real path into
+# ~/.config/systemd/user/ and enables it; either way `themesync doctor` checks the result.
 #   journalctl --user -u themesync -f
 #
 # Tied to the graphical session like Omarchy's own user units (bt-agent, fcitx5): `After=` is
@@ -21,7 +22,7 @@ ConditionPathIsDirectory=/sys/class/bluetooth
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/themesync daemon --no-gatt
+ExecStart=/usr/bin/themesync daemon --no-gatt
 # The daemon waits for bluetoothd / a powered adapter itself, with backoff; only a real
 # failure (no extended advertising, socket lost) exits, and then a restart is right.
 Restart=on-failure

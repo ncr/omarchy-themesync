@@ -29,7 +29,10 @@ use crate::protocol;
 use crate::themelist;
 use crate::transport::adv::{OpenError, Radio};
 use crate::transport::ble::{self, BleOptions};
-use crate::transport::ipc::{socket_path, Reply, Request};
+use crate::transport::ipc::{socket_path, Reply, Request, StatusInfo};
+
+/// What `--version` and `status` report as the wire protocol.
+pub const PROTOCOL: &str = "beacon v3, list status v2";
 
 /// Fixed (min == max). With the controller's 0–10 ms advDelay the worst gap between two
 /// events is 40 ms, inside the watch's 45 ms scan window (BEACON.md §1). Constant, no
@@ -560,26 +563,48 @@ pub async fn run(opts: Options) -> Result<()> {
                 }
                 let reply = match ipc.req {
                     Request::Ping => Reply { connected: Some(true), watch: Some("beacon".into()), ..Reply::ok("pong") },
-                    Request::Status => Reply {
-                        theme: Some(theme_name.clone()),
-                        connected: Some(beacon_up),
-                        watch: Some(format!(
-                            "beacon {}, key {}, scan {}, counter last {ctr_last}{} stale-rejected {ctr_rejected}, watch {}, last request {}, list push {}",
-                            if beacon_up { "on" } else if theme_wire.is_empty() { "idle" } else { "OFF THE AIR" },
-                            if key.is_some() { "loaded" } else { "missing" },
-                            match (*scan_on_tx.borrow(), *monitor_ok.lock().unwrap()) {
-                                (false, _) => "off".to_string(),
-                                (true, None) => "starting".to_string(),
-                                (true, Some(true)) => "on".to_string(),
-                                (true, Some(false)) => "on WITHOUT the advertisement monitor (BlueZ Experimental=false: requests slow or lost)".to_string(),
-                            },
-                            if ctr_locked { " (LOCKED: counter file unreadable)" } else { "" },
-                            watch_addr.as_deref().unwrap_or("unknown"),
-                            last_request.as_deref().unwrap_or("none"),
-                            list_state.lock().unwrap()
-                        )),
-                        ..Reply::ok(pair_state.clone())
-                    },
+                    Request::Status => {
+                        let monitor = if *scan_on_tx.borrow() { *monitor_ok.lock().unwrap() } else { None };
+                        let scan = match (*scan_on_tx.borrow(), monitor) {
+                            (false, _) => "off",
+                            (true, None) => "starting",
+                            (true, Some(true)) => "on",
+                            (true, Some(false)) => "degraded",
+                        };
+                        let beacon_state = if beacon_up { "on" } else if theme_wire.is_empty() { "idle" } else { "off_air" };
+                        let info = StatusInfo {
+                            protocol: PROTOCOL.into(),
+                            pairing: pair_state.clone(),
+                            paired: key.is_some(),
+                            beacon: beacon_state.into(),
+                            scan: scan.into(),
+                            monitor,
+                            theme: theme_name.clone(),
+                            ctr_last,
+                            ctr_locked,
+                            stale_rejected: ctr_rejected,
+                            watch: watch_addr.clone(),
+                            last_request: last_request.clone(),
+                            list_push: list_state.lock().unwrap().clone(),
+                            hook_installed: om.as_ref().map(|o| o.hooks_dir().join("themesync").is_file()).unwrap_or(false),
+                        };
+                        Reply {
+                            theme: Some(theme_name.clone()),
+                            connected: Some(beacon_up),
+                            watch: Some(format!(
+                                "beacon {}, key {}, scan {}, counter last {ctr_last}{} stale-rejected {ctr_rejected}, watch {}, last request {}, list push {}",
+                                if beacon_up { "on" } else if theme_wire.is_empty() { "idle" } else { "OFF THE AIR" },
+                                if key.is_some() { "loaded" } else { "missing" },
+                                if scan == "degraded" { "on WITHOUT the advertisement monitor (BlueZ Experimental=false: requests slow or lost)" } else { scan },
+                                if ctr_locked { " (LOCKED: counter file unreadable)" } else { "" },
+                                watch_addr.as_deref().unwrap_or("unknown"),
+                                last_request.as_deref().unwrap_or("none"),
+                                list_state.lock().unwrap()
+                            )),
+                            info: Some(info),
+                            ..Reply::ok(pair_state.clone())
+                        }
+                    }
                     Request::PushList { .. } => unreachable!("handled above"),
                     Request::ResetCounter => {
                         ctr_last = 0;

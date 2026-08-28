@@ -45,14 +45,40 @@ pub struct Reply {
     pub watch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// `status` only: the daemon's state as data (`themesync status --json`, the bar widget).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<StatusInfo>,
+}
+
+/// The daemon's state, for `status --json` and anything that wants to show it.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct StatusInfo {
+    pub protocol: String,
+    /// "paired" / "pairing pending" / "no key"
+    pub pairing: String,
+    pub paired: bool,
+    /// "on" (registered with BlueZ), "idle" (nothing to send: no key or no theme), "off_air" (registration failing)
+    pub beacon: String,
+    /// "on" / "starting" / "off" (no key) / "degraded" (no advertisement monitor)
+    pub scan: String,
+    /// Whether the advertisement monitor is registered (None while the scan is off/starting).
+    pub monitor: Option<bool>,
+    pub theme: String,
+    pub ctr_last: u16,
+    pub ctr_locked: bool,
+    pub stale_rejected: u32,
+    pub watch: Option<String>,
+    pub last_request: Option<String>,
+    pub list_push: String,
+    pub hook_installed: bool,
 }
 
 impl Reply {
     pub fn ok(msg: impl Into<String>) -> Reply {
-        Reply { ok: true, message: Some(msg.into()), connected: None, watch: None, theme: None }
+        Reply { ok: true, message: Some(msg.into()), connected: None, watch: None, theme: None, info: None }
     }
     pub fn err(msg: impl Into<String>) -> Reply {
-        Reply { ok: false, message: Some(msg.into()), connected: None, watch: None, theme: None }
+        Reply { ok: false, message: Some(msg.into()), connected: None, watch: None, theme: None, info: None }
     }
 }
 

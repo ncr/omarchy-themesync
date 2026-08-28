@@ -2,8 +2,18 @@
 name = "omarchy-themesync"
 version = "0.1.0"
 edition = "2021"
-description = "Push the active Omarchy desktop theme to external devices (Theme Protocol v1; smartwatch over BLE first)"
+# Not tested locally below the current stable (no rustup here); the CI `msrv` job builds with
+# exactly this version and is the check.
+rust-version = "1.85"
+description = "The Omarchy desktop theme on your smartwatch over BLE, both ways: a signed advertising beacon plus a request scanner, and the CLI around it"
 license = "MIT"
+license-file = "../LICENSE"
+repository = "https://github.com/ncr/omarchy-themesync"
+homepage = "https://github.com/ncr/omarchy-themesync"
+readme = "../README.md"
+keywords = ["omarchy", "bluetooth", "ble", "theme", "smartwatch"]
+categories = ["command-line-utilities", "hardware-support"]
+publish = false
 
 [[bin]]
 name = "themesync"
@@ -30,3 +40,5 @@ bluer = { version = "0.17.4", features = ["bluetoothd"] }
 [profile.release]
 strip = true
 lto = "thin"
+codegen-units = 1
+panic = "abort"

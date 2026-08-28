@@ -192,6 +192,36 @@ impl Radio {
     }
 }
 
+/// `themesync doctor`: what BlueZ and the controller offer, as checks. Read-only.
+pub async fn probe() -> Vec<crate::setup::Check> {
+    use crate::setup::Check;
+    let mut c = Vec::new();
+    let session = match Session::new().await {
+        Ok(s) => s,
+        Err(e) => { c.push(Check::fail("bluez", format!("cannot reach bluetoothd over D-Bus: {e}"), "sudo systemctl enable --now bluetooth")); return c; }
+    };
+    let adapter = match session.default_adapter().await {
+        Ok(a) => a,
+        Err(e) => { c.push(Check::fail("adapter", format!("no Bluetooth adapter: {e}"), "a BLE 5 controller is required (built-in or USB)")); return c; }
+    };
+    match adapter.is_powered().await {
+        Ok(true) => c.push(Check::ok("adapter", format!("{} powered on", adapter.name()))),
+        Ok(false) => c.push(Check::warn("adapter", format!("{} is powered off", adapter.name()), "bluetoothctl power on (the daemon waits for it)")),
+        Err(e) => c.push(Check::warn("adapter", format!("{}: {e}", adapter.name()), "")),
+    }
+    let channels = adapter.supported_advertising_secondary_channels().await.ok().flatten().unwrap_or_default();
+    if channels.contains(&SecondaryChannel::OneM) {
+        c.push(Check::ok("extended-adv", format!("secondary channels {:?}", channels.iter().map(|x| x.to_string()).collect::<Vec<_>>())));
+    } else {
+        c.push(Check::fail("extended-adv", "the controller has no extended advertising (BLE 5)", "the beacon (~80 B) needs BLE 5; a USB BLE 5 dongle works"));
+    }
+    match adapter.monitor().await {
+        Ok(_) => c.push(Check::ok("adv-monitor", "bluetoothd offers AdvertisementMonitorManager1")),
+        Err(_) => c.push(Check::warn("adv-monitor", "bluetoothd has no AdvertisementMonitorManager1 (Experimental = false)", "see bluez-conf below")),
+    }
+    c
+}
+
 async fn forward(tx: &mpsc::Sender<(Address, Vec<u8>)>, addr: Address, md: HashMap<u16, Vec<u8>>) {
     if let Some(data) = md.get(&COMPANY_ID) {
         if beacon::is_ours(data) {
