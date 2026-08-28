@@ -182,6 +182,14 @@ desktop identifies the watch by the MAC only and **never records a request's sou
 address**; the GATT address for list pushes is learned at pairing (§2b, `pair` connects to
 the watch and knows it); nobody can track the watch by its request traffic.
 
+Measured 2026-08-28, host with the Advertisement Monitor deliberately off
+(`THEMESYNC_NO_MONITOR=1`, i.e. a stock BlueZ): 43 swipes and picks, every one a new
+address (NRPA, top bits 00), every one seen and accepted, none rejected or repeated —
+including a request the watch replaced after 0.7 s. Watch-side loop request → echo: 0.2–0.6 s
+(that is the watch's own 320 ms scan window while a request is out), zero retransmissions
+across the series. Before this change, the same host without the monitor missed every
+second request and saw the rest 0–2.2 s late.
+
 The watch's connectable advertisement (ADV_IND, static address, name "OW-Watch", 1 s idle)
 stays as it was, without the request, for GATT (pairing, list push). It is scannable by
 definition, so the watch keeps a scan response but an **empty** one: the 128-bit service
