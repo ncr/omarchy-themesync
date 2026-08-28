@@ -335,6 +335,12 @@ async fn sync_gatt(src: &ThemeSource, opts: &BleOptions, retries: u32, proto: &s
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `themesync status | head` must end quietly, not with "failed printing to stdout":
+    // Rust ignores SIGPIPE and turns EPIPE into a panic; restore the Unix default.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Theme { src, json, source, contrast } => {

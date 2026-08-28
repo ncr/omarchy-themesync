@@ -32,6 +32,9 @@ hmac = "0.13.0"
 sha2 = "0.11.0"
 subtle = "2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # The daemon (state beacon + request scan) talks to BlueZ over D-Bus: Linux only. Everything
 # else (GATT via btleplug, the codecs, `push-list --direct`) builds and runs on macOS too.
 [target.'cfg(target_os = "linux")'.dependencies]
