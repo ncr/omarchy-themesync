@@ -21,17 +21,13 @@ what to implement.
 | what | why |
 |---|---|
 | Omarchy ≥ 4.0 | `omarchy-theme-set`, `omarchy-theme-color`, the `theme-set.d` hooks |
-| BlueZ ≥ 5.6x with **`Experimental = true`** in `/etc/bluetooth/main.conf` | the advertisement monitor: without it the controller filters advertising duplicates by address and the watch's requests arrive 0–2 s late or not at all. The beacon direction works either way. |
+| BlueZ ≥ 5.6x, stock configuration | advertising and scanning over D-Bus. Nothing in `/etc/bluetooth` needs changing. |
 | a **BLE 5** controller (extended advertising) | the beacon is ~80 bytes; legacy advertising carries 31. Most laptops since 2019 and any USB BLE 5 dongle qualify; `themesync doctor` tells you. |
 | the watch: OW-Watch firmware from `github.com/ncr/onewheel` (`watch/`), with list status v2 | the other end of `protocol/BEACON.md` v3 |
 | a desktop session (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`) | the daemon's socket lives in the runtime dir and the unit is tied to the graphical session |
 
-The daemon runs as your user and needs no privileges. The one root step is the BlueZ setting:
-
-```bash
-sudo sed -i 's/^#\?Experimental *=.*/Experimental = true/' /etc/bluetooth/main.conf
-sudo systemctl restart bluetooth
-```
+The daemon runs as your user, needs no privileges, and changes nothing outside your home
+directory.
 
 ## Install
 
@@ -95,7 +91,6 @@ Every one of these is in `themesync doctor`; the journal line is what you will s
 
 | symptom | journal / doctor line | fix |
 |---|---|---|
-| swipes on the watch work only sometimes, or late | `WARNING: bluetoothd has no AdvertisementMonitorManager1` | `Experimental = true` in `/etc/bluetooth/main.conf`, restart bluetooth, restart the service |
 | nothing happens at all | `no pairing key` / doctor `key` | `themesync pair` |
 | desktop changes never reach the watch | doctor `hook: no hook` | `themesync install` |
 | the daemon exits at start | `has no extended advertising (BLE 5)` | a BLE 5 controller; the codecs and GATT commands still work |
@@ -108,7 +103,8 @@ Every one of these is in `themesync doctor`; the journal line is what you will s
 Privacy and radio: the daemon broadcasts the theme name from the adapter's static address
 every 30 ms whenever it runs, and (while paired) keeps the adapter in active LE scanning.
 Anyone in range can see which theme you use; nobody without the key can change it or make
-the watch accept a theme. Stop the service when that is not what you want.
+the watch accept a theme. The watch's requests come from a fresh random address each time,
+so its swipes cannot be tracked. Stop the service when that is not what you want.
 
 ## Uninstall
 

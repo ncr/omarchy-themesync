@@ -284,10 +284,10 @@ pub async fn doctor() -> Report {
     #[cfg(target_os = "linux")]
     {
         c.extend(crate::transport::adv::probe().await);
-        match bluetooth_conf_experimental() {
-            Some(true) => c.push(Check::ok("bluez-conf", "/etc/bluetooth/main.conf: Experimental = true")),
-            Some(false) => c.push(Check::warn("bluez-conf", "/etc/bluetooth/main.conf: Experimental is not true", "sudo sed -i 's/^#\\?Experimental *=.*/Experimental = true/' /etc/bluetooth/main.conf && sudo systemctl restart bluetooth — without it requests from the watch are slow (0–2 s) or lost")),
-            None => c.push(Check::warn("bluez-conf", "/etc/bluetooth/main.conf not readable", "check that bluez is installed")),
+        // /etc/bluetooth/main.conf `Experimental` is informational only: the watch rotates its
+        // request address (BEACON.md §2), so the advertisement monitor is not required.
+        if let Some(true) = bluetooth_conf_experimental() {
+            c.push(Check::ok("bluez-conf", "/etc/bluetooth/main.conf: Experimental = true (optional)"));
         }
     }
 

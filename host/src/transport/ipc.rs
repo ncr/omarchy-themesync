@@ -22,7 +22,14 @@ pub enum Request {
     Status,
     Ping,
     /// `themesync pair`: hold this key as pending until a watch request verifies with it.
-    PairPending { key_hex: String },
+    /// `addr` is the watch's GATT address (`pair` just connected to it): requests come from
+    /// rotating random addresses, so this is the only place the daemon learns where to
+    /// connect for list pushes.
+    PairPending {
+        key_hex: String,
+        #[serde(default)]
+        addr: Option<String>,
+    },
     /// `themesync push-list`: send the theme list over GATT (protocol/BEACON.md §3);
     /// `force` sends it even when the watch reports the same crc.
     PushList {

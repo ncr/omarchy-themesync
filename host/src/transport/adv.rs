@@ -96,24 +96,26 @@ impl Radio {
     /// Scan for the watch's requests, forever; `on_packet(addr, data)` gets every
     /// manufacturer-data payload of ours (filtered by `beacon::is_ours`).
     ///
-    /// BlueZ discovery is an *active* scan with duplicates reported. The payload is taken
-    /// from the `ManufacturerData` property-changed signal of each device, never by
-    /// re-reading the device after a wake-up: a re-read samples BlueZ's cache after a D-Bus
-    /// round trip and misses a request the watch replaced in the meantime. Every device the
-    /// adapter reports gets one subscription; the cached value is never read (see below).
+    /// BlueZ discovery is an *active* scan with duplicates reported. The watch sends every
+    /// request (and every retransmission) from a fresh random address (BEACON.md §2), so
+    /// each one shows up as a new device: its manufacturer data is read once when BlueZ
+    /// adds the device, and then followed through the `ManufacturerData` property-changed
+    /// signal. Devices that existed before this scan started are only followed, never read:
+    /// BlueZ keeps a device's last data cached for a while after it stopped advertising, and
+    /// a minutes-old request would pass the counter check.
     ///
     /// `monitor_ok` is set to whether the Advertisement Monitor could be registered.
     pub async fn scan_ours(&self, monitor_ok: &Mutex<Option<bool>>, mut on_packet: impl FnMut(Address, &[u8])) -> Result<()> {
-        // An Advertisement Monitor on our manufacturer data (company 0xFFFF, magic 'T',
-        // kind request). Its events are not what we consume — the point is a side effect in
-        // the kernel: while any monitor is registered, LE scanning runs with the controller's
-        // duplicate filter *disabled* (hci_sync.c, hci_active_scan_sync). With the filter on,
-        // this adapter deduplicates by address, so a request the watch swaps into its
-        // advertisement stays invisible until the kernel's periodic scan restart — 0–2 s of
-        // latency, and a short-lived request lost outright (hardware, 2026-08-27, #203).
-        // bluetoothd offers AdvertisementMonitorManager1 only with `Experimental = true` in
-        // /etc/bluetooth/main.conf; without it, scan anyway and say so loudly.
-        let manager = self.adapter.monitor().await.ok();
+        // An Advertisement Monitor on our manufacturer data, when bluetoothd offers one
+        // (`Experimental = true` in /etc/bluetooth/main.conf). Its events are not consumed;
+        // the point is a side effect in the kernel: while a monitor is registered, LE
+        // scanning runs with the controller's duplicate filter disabled (hci_sync.c), so a
+        // packet is reported even from an address seen before. Since the watch changes its
+        // address per request this is a bonus, not a requirement.
+        let existing: std::collections::HashSet<Address> = self.adapter.device_addresses().await.unwrap_or_default().into_iter().collect();
+        // THEMESYNC_NO_MONITOR=1 skips the registration: the way to test, on a box that has
+        // the monitor, what every stock box sees.
+        let manager = if std::env::var_os("THEMESYNC_NO_MONITOR").is_some() { None } else { self.adapter.monitor().await.ok() };
         let mut monitor = match &manager {
             Some(m) => match m
                 .register(Monitor {
@@ -124,9 +126,9 @@ impl Radio {
                 .await
             {
                 Ok(h) => Some(h),
-                Err(e) => { eprintln!("[themesync] WARNING: advertisement monitor not registered ({e}): the controller may filter duplicates by address; requests from the watch will be slow (0–2 s) or lost"); None }
+                Err(e) => { eprintln!("[themesync] advertisement monitor not registered ({e}); scanning without it"); None }
             },
-            None => { eprintln!("[themesync] WARNING: bluetoothd has no AdvertisementMonitorManager1: set `Experimental = true` in /etc/bluetooth/main.conf and `sudo systemctl restart bluetooth`; until then requests from the watch will be slow (0–2 s) or lost"); None }
+            None => None, // no AdvertisementMonitorManager1 (BlueZ Experimental off): fine
         };
         *monitor_ok.lock().unwrap() = Some(monitor.is_some());
         let filter = DiscoveryFilter { transport: DiscoveryTransport::Le, duplicate_data: true, ..Default::default() };
@@ -153,15 +155,19 @@ impl Radio {
                             let gen = generation;
                             let tx = tx.clone();
                             let watched2 = watched.clone();
+                            let fresh = !existing.contains(&addr);
                             let task = tokio::spawn(async move {
                                 if let Ok(stream) = dev.events().await {
-                                    // No initial read of the cached property: BlueZ keeps a
-                                    // device's last ManufacturerData long after it stopped
-                                    // advertising it, and a minutes-old request would pass the
-                                    // counter check (never accepted = still "new"). Only live
-                                    // changes count; a request on the air during the ~1 s of a
-                                    // daemon restart is lost (the watch times out and repaints).
                                     let mut stream = std::pin::pin!(stream);
+                                    // A device BlueZ just created for this advertising report
+                                    // carries its data now and will not signal a change for
+                                    // the same bytes: read it once. A device that predates
+                                    // the scan is only followed (see above).
+                                    if fresh {
+                                        if let Ok(Some(md)) = dev.manufacturer_data().await {
+                                            forward(&tx, addr, md).await;
+                                        }
+                                    }
                                     // Every event, not just ours: BlueZ sends an RSSI change
                                     // every second or two, and a `while let` on the
                                     // ManufacturerData pattern alone would end the loop there
@@ -216,8 +222,8 @@ pub async fn probe() -> Vec<crate::setup::Check> {
         c.push(Check::fail("extended-adv", "the controller has no extended advertising (BLE 5)", "the beacon (~80 B) needs BLE 5; a USB BLE 5 dongle works"));
     }
     match adapter.monitor().await {
-        Ok(_) => c.push(Check::ok("adv-monitor", "bluetoothd offers AdvertisementMonitorManager1")),
-        Err(_) => c.push(Check::warn("adv-monitor", "bluetoothd has no AdvertisementMonitorManager1 (Experimental = false)", "see bluez-conf below")),
+        Ok(_) => c.push(Check::ok("adv-monitor", "bluetoothd offers AdvertisementMonitorManager1 (a bonus: the kernel scans without duplicate filtering)")),
+        Err(_) => c.push(Check::ok("adv-monitor", "not offered by bluetoothd (BlueZ Experimental off) — not needed")),
     }
     c
 }

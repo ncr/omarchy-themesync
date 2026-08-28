@@ -6,6 +6,12 @@ reviews that shaped v0.1 are `review-2026-08-27.md` (protocol) and
 
 ## Unreleased (v0.1.0 candidate)
 
+- The watch sends every request (and retransmission) from a fresh non-resolvable private
+  address on its own non-connectable advertising instance, so the controller's duplicate
+  filter never hides it: the BlueZ `Experimental = true` step is gone, nothing outside the
+  home directory needs changing. The daemon reads a new device's data once when BlueZ adds
+  it and never records a request's address; the GATT address comes from pairing.
+
 - `themesync install` / `uninstall` / `doctor`; `status --json`; the v1 tooling is hidden
   from `--help`.
 - Daemon hardening from the 2026-08-28 review: single instance, socket 0600 and no `/tmp`

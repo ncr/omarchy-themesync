@@ -167,13 +167,26 @@ no meta records beyond `0x41`.
 
 ## 2. Request (watch → desktop)
 
-Legacy advertising, one more AD structure in the watch's connectable advertisement (flags
-3 B + name "OW-Watch" 10 B + 2 + 2 + 11 = 28 ≤ 31 B; the TX-power AD is dropped). A legacy
-connectable advertisement (ADV_IND) is scannable by definition, so the watch keeps a scan
-response but an **empty** one: the 128-bit service UUID is no longer advertised — the
-desktop connects by address (§3) and finds an unpaired watch by its name. (A connectable,
-non-scannable advertisement exists only as an extended PDU, which BlueZ/btleplug connect to
-less reliably; not worth it for one empty SCAN_RSP per second.)
+**Its own advertising instance, its own address.** The request goes out on a second,
+non-connectable, non-scannable legacy advertisement (ADV_NONCONN_IND: flags 3 B + 2 + 2 +
+11 = 18 ≤ 31 B), **from a fresh non-resolvable private address** (top two bits 00, the rest
+random) drawn for every transmission and every retransmission (start, 1.5 s, 3 s, 6 s).
+Reason: LE controllers filter duplicate advertising reports **by advertiser address**; a
+request swapped in place under the watch's static address stayed invisible to the desktop
+until the kernel's periodic scan restart (0–2.2 s, measured on an Intel controller
+2026-08-27), and the only cure on the host side — an Advertisement Monitor, which makes the
+kernel scan with the filter off — needs `Experimental = true` in bluetoothd, a root-level
+change on every user's machine. A new address per attempt makes every request "a new
+device" to any controller, so it is reported at once, with a stock BlueZ. Side effects: the
+desktop identifies the watch by the MAC only and **never records a request's source
+address**; the GATT address for list pushes is learned at pairing (§2b, `pair` connects to
+the watch and knows it); nobody can track the watch by its request traffic.
+
+The watch's connectable advertisement (ADV_IND, static address, name "OW-Watch", 1 s idle)
+stays as it was, without the request, for GATT (pairing, list push). It is scannable by
+definition, so the watch keeps a scan response but an **empty** one: the 128-bit service
+UUID is not advertised — the desktop connects by address and finds an unpaired watch by its
+name.
 
 ```
 off  size  field
@@ -253,13 +266,16 @@ stops retransmitting while `omarchy-theme-set` is still running. Then:
 
 **Desktop scan.** BlueZ discovery is an *active* scan (`SetDiscoveryFilter {DuplicateData:
 true, Transport: le}` has no passive option) — the desktop sends SCAN_REQs; that is why the
-watch's advertisement is non-scannable. The daemon takes the manufacturer data **out of the
-D-Bus property-changed signal** (`DeviceProperty::ManufacturerData`), never by re-reading the
-device after a wake-up: re-reading sampled BlueZ's cache and missed a request replaced within
-one round trip. It also never reads the cached value at start: BlueZ keeps a device's last
-manufacturer data long after the device stopped advertising it, and a minutes-old request
-would pass the counter check. A request on the air during the ~1 s of a daemon restart is
-lost; the watch times out after 10 s and repaints from the beacon. The daemon both advertises and scans; the adapter supports that concurrently.
+request advertisement is non-scannable. Every request arrives as a **new BlueZ device**
+(new address): the daemon reads that device's manufacturer data once when BlueZ adds it,
+then follows the `ManufacturerData` property-changed signal. Devices that already existed
+when the scan started are followed but never read: BlueZ keeps a device's last manufacturer
+data cached for a while after it stopped advertising, and a minutes-old request would pass
+the counter check. A request on the air during the ~1 s of a daemon restart is lost; the
+watch times out after 10 s and repaints from the beacon. When bluetoothd offers an
+Advertisement Monitor (`Experimental = true`) the daemon registers one as a bonus — the
+kernel then scans without the controller's duplicate filter — but nothing depends on it.
+The daemon both advertises and scans; the adapter supports that concurrently.
 
 ## 2b. Pairing (the key, confirmed with a code on the watch)
 
@@ -276,7 +292,8 @@ watch:  on that write → "Pairing" screen: two rollers 0-F (iOS-style wheel), O
   no OK within 120 s → discard
 desktop: a §2 request whose MAC verifies with the pending key = confirmation:
   the pending key becomes the active key (~/.config/themesync/key), last counter = that
-  request's ctr, the watch's address is saved (~/.config/themesync/watch) for list pushes;
+  request's ctr, the address `pair` connected to is saved (~/.config/themesync/watch) for
+  list pushes — the request itself comes from a throwaway random address (§2);
   the old key stays active until then, so a wrong code or a timeout changes nothing.
   The desktop forgets the pending key 120 s after `pair` handed it over (same window as
   the watch; it survives a daemon restart inside the window). `pair` needs the daemon: without
@@ -308,7 +325,7 @@ Where the radio time goes, and what this version does about it:
 | beacon scan, screen off | none | none |
 | own advertisement, idle | 200 ms, connectable + scannable | **1 s**, connectable (ADV_IND) |
 | scan responses to the desktop's active scan | one per ~200 ms, forever, with the UUID | one per ~1 s, empty |
-| own advertisement, request out | 200 ms | **100 ms, ≤ 10 s** |
+| own advertisement, request out | 200 ms | **100 ms, ≤ 10 s**, on a second non-connectable instance from a fresh random address per attempt (2026-08-28) |
 | NVS writes | every applied beacon | after 10 s stable, only if different |
 | HMAC | — | one SHA-256 per *changed* theme (rule 1 of §1 runs first) |
 
@@ -320,9 +337,9 @@ internal-RAM starvation while the radio was up.
 
 Rare, large, or secret goes over a normal connection: the pairing key (§2b) and the theme
 list below. `…0004` is reserved by the watch project. Neither is needed for the loop above.
-The desktop connects **by address** (saved at pairing, refreshed from every accepted
-request); the watch's scan response is empty, so the service UUID is discovered after
-connecting, not from a scan.
+The desktop connects **by address** (the one `pair` connected to, saved then; requests
+arrive from random addresses and teach it nothing); the watch's scan response is empty, so
+the service UUID is discovered after connecting, not from a scan.
 
 ### 3a. The theme list
 
@@ -445,6 +462,11 @@ Settled by the user:
   non-scannable; MAC the beacon now.
 - 2026-08-28: same scan budget, spent as 45 ms every 1 s instead of 120 ms every 2.56 s;
   the desktop therefore beacons at 30 ms constantly and the 10 s burst is gone.
+- 2026-08-28 (release): the request goes out on its own non-connectable instance from a
+  fresh non-resolvable private address per (re)transmission, so the controller's duplicate
+  filter never hides it — the Advertisement Monitor (BlueZ `Experimental = true`, a root
+  change on every user's box) becomes optional. The desktop never records a request's
+  address; the GATT address comes from pairing.
 - 2026-08-28 (code review, `docs/review-code-2026-08-28.md`): the list COMMIT MAC gets a
   per-transfer nonce from the READ status (it was a pure function of the list bytes, so a
   recorded push replayed); beacon replay is accepted and written down, with a 60 s floor on

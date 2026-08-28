@@ -9,9 +9,8 @@
 # Tied to the graphical session like Omarchy's own user units (bt-agent, fcitx5): `After=` is
 # ordering only, so with `WantedBy=default.target` this would start on an SSH login and at
 # boot before the session environment (OMARCHY_PATH, WAYLAND_DISPLAY) is imported, and
-# omarchy-theme-set would half-apply. Needs bluez with `Experimental = true` in
-# /etc/bluetooth/main.conf (the advertisement monitor; without it requests from the watch
-# are slow or lost) and a BLE 5 controller (extended advertising).
+# omarchy-theme-set would half-apply. Needs bluez (stock configuration) and a BLE 5
+# controller (extended advertising).
 [Unit]
 Description=Omarchy theme beacon + watch request scanner (themesync daemon)
 After=bluetooth.target graphical-session.target

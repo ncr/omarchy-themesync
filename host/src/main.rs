@@ -471,17 +471,23 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let code = beacon::new_key().context("reading /dev/urandom")?[0];
-            // Hand the key to the daemon as *pending*: it becomes active only when the watch
-            // sends a request signed with it, i.e. after the code was entered correctly.
-            match ipc::request(&Request::PairPending { key_hex: protocol::to_hex(&key) }, Duration::from_secs(5)).await? {
-                Some(r) if r.ok => {}
-                Some(r) => bail!("daemon refused the pending key: {}", r.message.unwrap_or_default()),
-                // Without the daemon nobody can see the watch's confirmation, and writing the
-                // key unconfirmed would cut off the currently paired watch on a mistyped code
-                // (BEACON.md §2b: the old key stays active until the new one is confirmed).
-                None => bail!("the daemon is not running: start it first (systemctl --user start themesync), or use --no-watch to write a key without confirmation"),
+            // The daemon must be there: without it nobody can see the watch's confirmation,
+            // and writing the key unconfirmed would cut off the currently paired watch on a
+            // mistyped code (BEACON.md §2b: the old key stays active until the new one is confirmed).
+            if ipc::request(&Request::Ping, Duration::from_secs(5)).await?.is_none() {
+                bail!("the daemon is not running: start it first (systemctl --user start themesync), or use --no-watch to write a key without confirmation");
             }
             let (_adapter, peripheral) = find_watch(&ble.options(), 3).await?;
+            // The GATT address goes to the daemon with the key: the watch's requests arrive
+            // from rotating random addresses, so this is where list pushes learn their target.
+            let addr = btleplug::api::Peripheral::address(&peripheral).to_string();
+            // Hand the key to the daemon as *pending*: it becomes active only when the watch
+            // sends a request signed with it, i.e. after the code was entered correctly.
+            match ipc::request(&Request::PairPending { key_hex: protocol::to_hex(&key), addr: Some(addr) }, Duration::from_secs(5)).await? {
+                Some(r) if r.ok => {}
+                Some(r) => bail!("daemon refused the pending key: {}", r.message.unwrap_or_default()),
+                None => bail!("the daemon went away"),
+            }
             let r = ble::write_characteristic(&peripheral, ble::MINI_CHR_KEY, &beacon::encode_pair_write(code, &key)).await;
             let _ = btleplug::api::Peripheral::disconnect(&peripheral).await;
             r.context("sending the pairing request to the watch")?;

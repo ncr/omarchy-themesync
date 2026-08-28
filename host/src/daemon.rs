@@ -484,14 +484,17 @@ pub async fn run(opts: Options) -> Result<()> {
     let mut bad_log = BadPacketLog::new();
     // A pending key is honoured for PENDING_KEY_TTL from the moment it was handed over
     // (BEACON.md §2b); the watch's own window is the same, so a later confirmation cannot
-    // come. Persisted so a daemon restart inside that window does not lose it.
+    // come. Persisted so a daemon restart inside that window does not lose it. The address
+    // `pair` connected to comes with it and becomes the list-push address on confirmation.
     let mut pending: Option<(Key, Instant)> = beacon::load_pending_key().map(|(k, age)| (k, Instant::now() - age));
+    let mut pending_addr: Option<String> = None;
     if pending.is_some() {
         log(&format!("pairing: pending key restored from {}", beacon::pending_key_path().display()));
     }
     let mut pair_state = String::from(if pending.is_some() { "pairing pending" } else if key.is_some() { "paired" } else { "no key" });
-    // The theme list push (protocol/BEACON.md §3): the watch's address (saved at pairing,
-    // refreshed from every accepted request), the one-at-a-time gate, the last outcome.
+    // The theme list push (protocol/BEACON.md §3): the watch's GATT address (learned at
+    // pairing only — requests arrive from rotating random addresses, BEACON.md §2), the
+    // one-at-a-time gate, the last outcome.
     let mut watch_addr: Option<String> = beacon::load_watch_addr();
     let list_gate = Arc::new(Semaphore::new(1));
     let list_state = Arc::new(Mutex::new(String::from("never")));
@@ -617,9 +620,10 @@ pub async fn run(opts: Options) -> Result<()> {
                             Err(e) => Reply::err(format!("could not write {}: {e}", beacon::ctr_path().display())),
                         }
                     }
-                    Request::PairPending { key_hex } => match protocol::from_hex(&key_hex).and_then(|v| Key::try_from(v).ok()) {
+                    Request::PairPending { key_hex, addr } => match protocol::from_hex(&key_hex).and_then(|v| Key::try_from(v).ok()) {
                         Some(k) => {
                             pending = Some((k, Instant::now()));
+                            pending_addr = addr;
                             if let Err(e) = beacon::save_pending_key(&k) {
                                 log(&format!("pairing: could not persist the pending key: {e}"));
                             }
@@ -687,10 +691,14 @@ pub async fn run(opts: Options) -> Result<()> {
                         ctr_locked = false;
                         last_rejected = None;
                         if let Err(e) = beacon::save_ctr(ctr_last) { log(&format!("could not write {}: {e}", beacon::ctr_path().display())); }
-                        watch_addr = Some(addr.to_string());
-                        if let Err(e) = beacon::save_watch_addr(&addr.to_string()) { log(&format!("could not write {}: {e}", beacon::watch_path().display())); }
-                        pair_state = format!("paired with {addr}");
-                        last_request = Some(format!("{:?} #{} from {addr} [pairing confirmation]", req.op, req.ctr));
+                        // The GATT address is the one `pair` connected to; the request's
+                        // source address is a random one the watch will never use again.
+                        if let Some(a) = pending_addr.take() {
+                            watch_addr = Some(a.clone());
+                            if let Err(e) = beacon::save_watch_addr(&a) { log(&format!("could not write {}: {e}", beacon::watch_path().display())); }
+                        }
+                        pair_state = format!("paired with {}", watch_addr.as_deref().unwrap_or("the watch (address unknown: pair again with the daemon running)"));
+                        last_request = Some(format!("{:?} #{} [pairing confirmation]", req.op, req.ctr));
                         // The beacon is signed with the new key from now on.
                         if let Ok((name, v2)) = current_theme().await {
                             theme_name = name; theme_v2 = v2;
@@ -729,13 +737,9 @@ pub async fn run(opts: Options) -> Result<()> {
                         // omarchy-theme-set even starts.
                         theme_wire = sign(key.as_ref(), &theme_v2, ctr_last);
                         beacon_up = publish(&mut radio, &theme_wire).await;
-                        let a = addr.to_string();
-                        if watch_addr.as_deref() != Some(&a) {
-                            watch_addr = Some(a.clone());
-                            if let Err(e) = beacon::save_watch_addr(&a) { log(&format!("could not write {}: {e}", beacon::watch_path().display())); }
-                        }
-                        last_request = Some(format!("{:?} #{} from {a}", req.op, req.ctr));
-                        log(&format!("{a}: {:?} #{}", req.op, req.ctr));
+                        // `addr` is a throwaway random address (BEACON.md §2): logged, never saved.
+                        last_request = Some(format!("{:?} #{}", req.op, req.ctr));
+                        log(&format!("{:?} #{} (from {addr})", req.op, req.ctr));
                         let k = key.expect("Verified::Active implies an active key");
                         if req.op == Op::Resend {
                             continue; // the echo above is the answer
@@ -757,7 +761,7 @@ pub async fn run(opts: Options) -> Result<()> {
                         match om.list_themes().into_iter().filter(|s| s.len() <= protocol::V2_MAX_NAME).find(|s| beacon::slug_id(s) == req.arg) {
                             Some(slug) => { let _ = tx.send((req.ctr, slug)); }
                             None => {
-                                log(&format!("{a}: SET {:#06x} matches no installed theme; pushing the list", req.arg));
+                                log(&format!("SET {:#06x} matches no installed theme; pushing the list", req.arg));
                                 list_push(list_job(k, watch_addr.clone(), true, "unknown theme"), list_gate.clone(), list_state.clone(), None);
                             }
                         }
