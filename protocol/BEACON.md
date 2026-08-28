@@ -105,8 +105,18 @@ every 1 s while the screen is on (4.5 % of radio time, the same budget as the ea
 120 ms / 2.56 s, with 2.5× lower latency), one window immediately when the screen turns
 on, and 45 ms every 320 ms while it has a request on the air (≈14 %, ≤10 s); no scanning
 with the screen off (the theme cannot be seen then anyway). Worst-case latency for a
-desktop-initiated change, screen on: 1 s. The steady interval is to be measured once with
-`btmon` and the number recorded here — the daemon cannot see what BlueZ actually programmed.
+desktop-initiated change, screen on: 1 s.
+
+Measured 2026-08-28 (`btmon`: "Min/Max advertising interval: 30.000 msec" — BlueZ programs
+what the daemon asks for). Desktop → watch, from the end of `omarchy-theme-set` to the
+watch's `beacon: applied` line, 21 samples at uneven spacing: 0.11 … 1.15 s, mean ≈ 0.6 s,
+uniform over the 1 s scan period plus a ~0.1 s floor (the daemon publishes ~1 ms after the
+command ends; the rest is UART/polling on the watch); one 2.03 s — one missed window in
+~21 at −68…−71 dBm, where a window holds only 1–2 advertising events and one corrupted
+packet costs a full period. For comparison, the 80 ms beacon against the same 45 ms window
+missed every second window (0.09 0.09 0.12 1.08 1.08 1.26 s). Measurement trap: samples at
+a constant ~3.0 s spacing gave 8 × 0.27 ± 0.02 s — the test loop phase-locked to the 1 s
+scan period; space the samples unevenly.
 
 ## 2. Request (watch → desktop)
 
@@ -248,7 +258,7 @@ Where the radio time goes, and what this version does about it:
 | NVS writes | every applied beacon | after 10 s stable, only if different |
 | HMAC | — | one SHA-256 per *changed* theme (rule 1 of §1 runs first) |
 
-The 45 ms / 1 s figure is still to be **measured** (`SCROLL_STRESS=1` + periodic
+The 45 ms / 1 s figure's effect on the screen is still to be **measured** (`SCROLL_STRESS=1` + periodic
 ext-scan, watching "largest DMA block" in the heartbeat) — the earlier screen freeze was
 internal-RAM starvation while the radio was up.
 
@@ -378,5 +388,5 @@ Open, in the order they should be taken:
    the build-time default key behind a build flag, off by default.
 2. **Theme addressing** `arg = [list index u8][list crc8 u8]` (an ETag / If-Match): no crc
    collisions, and a stale list is detected on every SET, including renames and additions.
-3. Measure: the beacon interval BlueZ actually programs (`btmon`), and the watch's scan duty
-   under the ESC link.
+3. Measure: the watch's scan duty under the ESC link (the beacon interval is done: 30 ms
+   confirmed with `btmon`, §1).
