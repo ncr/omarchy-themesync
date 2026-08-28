@@ -168,7 +168,7 @@ docs/                        changelog, the two reviews, omarchy.md (Omarchy int
 ## Development
 
 ```bash
-cd host && cargo build && cargo test           # 42 tests: codecs, MAC, vectors, list, mapping, resolver parity, sim
+cd host && cargo build && cargo test           # 45 tests: codecs, MAC, vectors, list, mapping, resolver parity, sim
 cargo run -- theme --file tests/fixtures/tokyo-night.toml --contrast
 cargo run -- push-list --dry-run               # the list and its frames, without a watch
 cargo install --path . --locked && systemctl --user restart themesync

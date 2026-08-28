@@ -126,6 +126,45 @@ missed every second window (0.09 0.09 0.12 1.08 1.08 1.26 s). Measurement trap: 
 a constant ~3.0 s spacing gave 8 × 0.27 ± 0.02 s — the test loop phase-locked to the 1 s
 scan period; space the samples unevenly.
 
+### 1a. The theme packet (v2 TLV)
+
+The theme bytes are the OW-Watch's own `colors` format (`main/theme.h` in the firmware;
+`host/src/protocol.rs` mirrors it). This is the only place it is written down outside the
+two implementations. `protocol/THEME_PROTOCOL.md` describes Theme Protocol v1, an earlier
+design that no device speaks.
+
+```
+[0x02]  then records, in any order:
+  colour  [role id 1..0x3F][R][G][B]
+  meta    [tag >= 0x40][len][payload]      0x40 name (UTF-8, <= 31 B, the theme slug)
+                                           0x41 flags (1 B): bit0 light, bit1 force_black
+                                           0x43 echo (2 B) and 0x42 mac (4 B): beacon only, §1
+```
+
+Role ids (append-only; a receiver skips ids it does not know and derives every role it
+was not given from background + foreground, which are required):
+
+```
+   1  Background
+   2  TextPrimary
+   3  Accent
+   4  Danger
+   5  Warning
+   6  Success
+   7  Info
+   8  Surface
+   9  SurfaceAlt
+  10  TextSecondary
+  11  TextDisabled
+  12  OnAccent
+  13  Selection
+  14  Divider
+```
+
+A record that would run past the end of the packet ends parsing; a duplicate `0x40`/`0x41`
+last-wins. The list entries of §3a carry exactly this packet with the slug as the name and
+no meta records beyond `0x41`.
+
 ## 2. Request (watch → desktop)
 
 Legacy advertising, one more AD structure in the watch's connectable advertisement (flags

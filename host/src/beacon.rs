@@ -225,6 +225,36 @@ pub fn decode_request(key: &[u8], b: &[u8]) -> Result<Request, RequestError> {
     Ok(Request { ctr, op, arg })
 }
 
+/// What the counter rule says about an authenticated request (BEACON.md §2), as a pure
+/// function so it can be tested without a daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtrVerdict {
+    /// `ctr > last`: accept and persist `ctr`.
+    Accept,
+    /// `ctr == last`: the watch's own retransmission of the request just accepted; drop silently.
+    Duplicate,
+    /// `ctr < last`: stale (reflash, replay, cache); drop and say so.
+    Stale,
+    /// The counter file could not be read: nothing is accepted until it is reset.
+    Locked,
+    /// `last == 65535`: the counter is used up; re-pair.
+    Exhausted,
+}
+
+pub fn judge_ctr(ctr: u16, last: u16, locked: bool) -> CtrVerdict {
+    if locked {
+        CtrVerdict::Locked
+    } else if ctr > last {
+        CtrVerdict::Accept
+    } else if ctr == last {
+        CtrVerdict::Duplicate
+    } else if last == u16::MAX {
+        CtrVerdict::Exhausted
+    } else {
+        CtrVerdict::Stale
+    }
+}
+
 /// True for any packet of ours (either kind), so the scanner can skip other 0xFFFF users.
 pub fn is_ours(b: &[u8]) -> bool {
     b.len() >= 2 && b[0] == MAGIC && (b[1] == KIND_STATE || b[1] == KIND_REQUEST)
@@ -483,6 +513,135 @@ mod tests {
         assert_eq!(beacon.len(), 30);
         assert_eq!(decode_state(&key, &beacon1).unwrap().1, 1);
         assert_eq!(crc16(&theme), 0xD5E2);
+    }
+
+    #[test]
+    fn counter_rule() {
+        use CtrVerdict::*;
+        assert_eq!(judge_ctr(1, 0, false), Accept);
+        assert_eq!(judge_ctr(500, 3, false), Accept); // gaps are fine (a crash on the watch skips values)
+        assert_eq!(judge_ctr(7, 7, false), Duplicate);
+        assert_eq!(judge_ctr(6, 7, false), Stale);
+        assert_eq!(judge_ctr(1, 4000, false), Stale); // a reflashed watch
+        assert_eq!(judge_ctr(9, 9, true), Locked);
+        assert_eq!(judge_ctr(65535, 0, true), Locked);
+        assert_eq!(judge_ctr(1, u16::MAX, false), Exhausted);
+        assert_eq!(judge_ctr(u16::MAX, u16::MAX, false), Duplicate);
+        // reset-counter reopens acceptance; pairing sets last = the confirming request's ctr
+        assert_eq!(judge_ctr(1, 0, false), Accept);
+    }
+
+    /// Every decoder, fed structured junk: truncations and extensions of every valid
+    /// encoder output plus a deterministic pseudo-random corpus. Nothing may panic, and
+    /// `v2_theme_end` may never point past the end.
+    #[test]
+    fn hostile_input_never_panics() {
+        let key: Vec<u8> = (0u8..16).collect();
+        let theme = protocol::from_hex("02011020300240506040046e6f7264410100").unwrap();
+        let mut corpus: Vec<Vec<u8>> = Vec::new();
+        let valid = [
+            encode_request(&key, Request { ctr: 1, op: Op::Set, arg: 0xAAE5 }).to_vec(),
+            encode_state(&key, &theme, 1),
+            theme.clone(),
+            crate::themelist::encode_list(&[theme.clone()]).unwrap(),
+            crate::themelist::ListStatus { version: crate::themelist::STATUS_VERSION, count: 1, crc: 1, on_sd: false, loaded: true, nonce: 5 }.encode().to_vec(),
+        ];
+        for v in &valid {
+            for n in 0..=v.len() {
+                corpus.push(v[..n].to_vec());
+                let mut ext = v.clone();
+                ext.extend(std::iter::repeat(0x42).take(n));
+                corpus.push(ext);
+            }
+            for i in 0..v.len() {
+                for bit in [0x01, 0x80, 0xFF] {
+                    let mut x = v.clone();
+                    x[i] ^= bit;
+                    corpus.push(x);
+                }
+            }
+        }
+        let mut seed: u32 = 0x1234_5678;
+        for len in 0..48 {
+            for _ in 0..64 {
+                let mut v = Vec::with_capacity(len);
+                for _ in 0..len {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    v.push((seed >> 24) as u8);
+                }
+                // bias towards our magic and record tags so the parsers get past the first byte
+                if len > 1 && seed & 1 == 0 { v[0] = MAGIC; v[1] = if seed & 2 == 0 { KIND_STATE } else { KIND_REQUEST }; }
+                if len > 0 && seed & 4 == 0 { v[0] = 2; }
+                corpus.push(v);
+            }
+        }
+        for b in &corpus {
+            let _ = decode_request(&key, b);
+            let _ = decode_request_with(Some(&[1; 16]), Some(&[2; 16]), b);
+            let _ = decode_state(&key, b);
+            let _ = protocol::decode_v2(b);
+            assert!(protocol::v2_theme_end(b) <= b.len());
+            let _ = protocol::decode_theme(b);
+            let _ = crate::themelist::decode_list(b);
+            let _ = crate::themelist::ListStatus::decode(b);
+            let _ = check_theme(b);
+            let _ = is_ours(b);
+        }
+        assert!(corpus.len() > 3000);
+    }
+
+    /// The apply-rule contract of a beacon (BEACON.md §1): the fixed tail, the mac last,
+    /// the theme bytes stable across echoes.
+    #[test]
+    fn state_beacon_conformance() {
+        let key: Vec<u8> = (0u8..16).collect();
+        let theme = protocol::from_hex("02011020300240506040046e6f7264410100").unwrap();
+        let good = encode_state(&key, &theme, 7);
+        // no mac record at all
+        let mut no_mac = vec![MAGIC, KIND_STATE];
+        no_mac.extend_from_slice(&theme);
+        protocol::v2_append_echo(&mut no_mac, 7);
+        assert_eq!(decode_state(&key, &no_mac), Err(RequestError::BadLength(no_mac.len())));
+        // a mac record in the middle of the colour records: the theme ends there, the tail is wrong
+        let mut mid = vec![MAGIC, KIND_STATE, 2, 1, 0x10, 0x20, 0x30];
+        protocol::v2_append_mac(&mut mid, &[0; 4]);
+        mid.extend_from_slice(&[2, 0x40, 0x50, 0x60]);
+        protocol::v2_append_echo(&mut mid, 7);
+        let m = mac4(&key, &mid);
+        protocol::v2_append_mac(&mut mid, &m);
+        assert!(decode_state(&key, &mid).is_err());
+        // echo after the mac
+        let mut swapped = vec![MAGIC, KIND_STATE];
+        swapped.extend_from_slice(&theme);
+        let m = mac4(&key, &swapped);
+        protocol::v2_append_mac(&mut swapped, &m);
+        protocol::v2_append_echo(&mut swapped, 7);
+        assert!(decode_state(&key, &swapped).is_err());
+        // a duplicate echo
+        let mut dup = vec![MAGIC, KIND_STATE];
+        dup.extend_from_slice(&theme);
+        protocol::v2_append_echo(&mut dup, 7);
+        protocol::v2_append_echo(&mut dup, 8);
+        let m = mac4(&key, &dup);
+        protocol::v2_append_mac(&mut dup, &m);
+        assert!(decode_state(&key, &dup).is_err());
+        // the theme bytes the watch hashes do not move with the echo
+        let (t7, e7) = decode_state(&key, &good).unwrap();
+        let other = encode_state(&key, &theme, 8);
+        let (t8, e8) = decode_state(&key, &other).unwrap();
+        assert_eq!((t7, e7), (&theme[..], 7));
+        assert_eq!((t8, e8), (&theme[..], 8));
+        assert_eq!(crc16(t7), crc16(t8));
+        // the largest legal theme (14 roles, a 31-byte name, flags) fits the beacon budget
+        let mut big = vec![2u8];
+        for id in 1..=14u8 { big.extend_from_slice(&[id, 1, 2, 3]); }
+        big.push(protocol::V2_TAG_NAME); big.push(31); big.extend_from_slice(&[b'x'; 31]);
+        big.extend_from_slice(&[protocol::V2_TAG_FLAGS, 1, 0]);
+        assert_eq!(check_theme(&big), Ok(()));
+        let wire = encode_state(&key, &big, u16::MAX);
+        assert!(wire.len() <= MAX_THEME_LEN + 2 + 4 + 6);
+        assert!(wire.len() + 4 <= 254, "manufacturer data + AD header must fit one extended advertising PDU");
+        assert_eq!(decode_state(&key, &wire).unwrap().0, &big[..]);
     }
 
     #[test]

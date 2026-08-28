@@ -701,27 +701,26 @@ pub async fn run(opts: Options) -> Result<()> {
                         list_push(list_job(k, watch_addr.clone(), false, "pairing"), list_gate.clone(), list_state.clone(), None);
                     }
                     Ok((req, Verified::Active)) => {
-                        if req.ctr == ctr_last && !ctr_locked {
+                        match beacon::judge_ctr(req.ctr, ctr_last, ctr_locked) {
+                            beacon::CtrVerdict::Accept => {}
                             // The watch's retransmission of the request just accepted (its
                             // stop-and-wait, BEACON.md §2), re-delivered by BlueZ on every
                             // advertising event: expected, silent.
-                            continue;
-                        }
-                        if req.ctr <= ctr_last {
-                            if last_rejected != Some(req.ctr) {
-                                ctr_rejected += 1;
-                                last_rejected = Some(req.ctr);
-                                if ctr_locked {
-                                    log(&format!("{addr}: {:?} #{} rejected: the counter file is unreadable; run `themesync reset-counter` or `themesync pair`", req.op, req.ctr));
-                                } else if ctr_last == u16::MAX {
-                                    log(&format!("{addr}: {:?} #{} rejected: the counter is exhausted (65535); run `themesync pair` to start a new one", req.op, req.ctr));
-                                } else if req.ctr < ctr_last.saturating_sub(100) {
-                                    log(&format!("{addr}: {:?} #{} rejected: last accepted is #{ctr_last} — a reflashed watch counts from 1 again; run `themesync pair` (resets both sides) or `themesync reset-counter`", req.op, req.ctr));
-                                } else {
-                                    log(&format!("{addr}: {:?} #{} rejected: stale (last accepted #{ctr_last})", req.op, req.ctr));
+                            beacon::CtrVerdict::Duplicate => continue,
+                            verdict => {
+                                if last_rejected != Some(req.ctr) {
+                                    ctr_rejected += 1;
+                                    last_rejected = Some(req.ctr);
+                                    let why = match verdict {
+                                        beacon::CtrVerdict::Locked => "the counter file is unreadable; run `themesync reset-counter` or `themesync pair`".to_string(),
+                                        beacon::CtrVerdict::Exhausted => "the counter is exhausted (65535); run `themesync pair` to start a new one".to_string(),
+                                        _ if req.ctr < ctr_last.saturating_sub(100) => format!("last accepted is #{ctr_last} — a reflashed watch counts from 1 again; run `themesync pair` (resets both sides) or `themesync reset-counter`"),
+                                        _ => format!("stale (last accepted #{ctr_last})"),
+                                    };
+                                    log(&format!("{addr}: {:?} #{} rejected: {why}", req.op, req.ctr));
                                 }
+                                continue;
                             }
-                            continue;
                         }
                         ctr_last = req.ctr;
                         if let Err(e) = beacon::save_ctr(ctr_last) { log(&format!("could not write {}: {e}", beacon::ctr_path().display())); }
