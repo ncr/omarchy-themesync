@@ -610,7 +610,7 @@ async fn main() -> Result<()> {
                     Some(i) => {
                         println!("daemon:   running, {} ({})", i.pairing, i.protocol);
                         println!("beacon:   {}{}", match i.beacon.as_str() { "on" => "on the air", "idle" => "idle (nothing to send)", _ => "OFF THE AIR — journalctl --user -u themesync" }, if i.theme.is_empty() { String::new() } else { format!(", theme {}", i.theme) });
-                        println!("scan:     {}", match i.scan.as_str() { "on" => "on".to_string(), "off" => "off (no pairing key)".into(), "starting" => "starting".into(), _ => "on, WITHOUT the advertisement monitor: requests slow or lost (BlueZ Experimental = true fixes it)".into() });
+                        println!("scan:     {}", match (i.scan.as_str(), i.monitor) { ("on", Some(true)) => "on (+ advertisement monitor)", ("on", _) => "on", ("off", _) => "off (no pairing key)", _ => "starting" });
                         println!("watch:    {}{}", i.watch.as_deref().unwrap_or("unknown"), i.last_request.as_ref().map(|r| format!(", last request {r}")).unwrap_or_default());
                         println!("counter:  last accepted #{}{}{}", i.ctr_last, if i.ctr_locked { " — LOCKED (counter file unreadable): themesync reset-counter" } else { "" }, if i.stale_rejected > 0 { format!(", {} stale request(s) rejected", i.stale_rejected) } else { String::new() });
                         println!("list:     {}", i.list_push);

@@ -66,9 +66,9 @@ pub struct StatusInfo {
     pub paired: bool,
     /// "on" (registered with BlueZ), "idle" (nothing to send: no key or no theme), "off_air" (registration failing)
     pub beacon: String,
-    /// "on" / "starting" / "off" (no key) / "degraded" (no advertisement monitor)
+    /// "on" / "starting" / "off" (no key)
     pub scan: String,
-    /// Whether the advertisement monitor is registered (None while the scan is off/starting).
+    /// Whether the optional advertisement monitor is registered (None while the scan is off/starting).
     pub monitor: Option<bool>,
     pub theme: String,
     pub ctr_last: u16,

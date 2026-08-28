@@ -336,7 +336,6 @@ pub async fn doctor() -> Report {
             let summary = info.as_ref().map(|i| format!("{}, beacon {}, scan {}", r.message.clone().unwrap_or_default(), i.beacon, i.scan)).unwrap_or_else(|| r.message.clone().unwrap_or_default());
             match info {
                 Some(i) if i.beacon == "off_air" => c.push(Check::fail("daemon", summary, "journalctl --user -u themesync -n 30")),
-                Some(i) if i.monitor == Some(false) => c.push(Check::warn("daemon", summary, "see bluez-conf above")),
                 _ => c.push(Check::ok("daemon", summary)),
             }
         }

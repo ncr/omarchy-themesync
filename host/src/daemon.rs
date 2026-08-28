@@ -571,8 +571,7 @@ pub async fn run(opts: Options) -> Result<()> {
                         let scan = match (*scan_on_tx.borrow(), monitor) {
                             (false, _) => "off",
                             (true, None) => "starting",
-                            (true, Some(true)) => "on",
-                            (true, Some(false)) => "degraded",
+                            (true, Some(_)) => "on",
                         };
                         let beacon_state = if beacon_up { "on" } else if theme_wire.is_empty() { "idle" } else { "off_air" };
                         let info = StatusInfo {
@@ -598,7 +597,7 @@ pub async fn run(opts: Options) -> Result<()> {
                                 "beacon {}, key {}, scan {}, counter last {ctr_last}{} stale-rejected {ctr_rejected}, watch {}, last request {}, list push {}",
                                 if beacon_up { "on" } else if theme_wire.is_empty() { "idle" } else { "OFF THE AIR" },
                                 if key.is_some() { "loaded" } else { "missing" },
-                                if scan == "degraded" { "on WITHOUT the advertisement monitor (BlueZ Experimental=false: requests slow or lost)" } else { scan },
+                                match monitor { Some(true) => "on (+ advertisement monitor)", _ => scan },
                                 if ctr_locked { " (LOCKED: counter file unreadable)" } else { "" },
                                 watch_addr.as_deref().unwrap_or("unknown"),
                                 last_request.as_deref().unwrap_or("none"),
