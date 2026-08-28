@@ -319,6 +319,12 @@ desktop: a §2 request whose MAC verifies with the pending key = confirmation:
   (it survives a daemon restart inside the window).
 ```
 
+Verified 2026-08-28 21:07 on the hardware, started from the watch's Pair screen: `0x04`
+seen → offer written as "spawner" (10 s: finding the watch by address in a fresh btleplug
+scan against a 1 s advertisement) → code entered → confirmation from a random address
+(30:2D:…) → key saved, list push aimed at the pairing address (skipped: the watch held the
+same list), 12 SETs afterwards with the watch's counter continuing unreset.
+
 **Several desktops.** The watch verifies every beacon against every stored key (after the
 crc rule of §1, so only a changed beacon costs a MAC per key) and calls a desktop "in
 range" while its beacon was seen ≤ 3 s ago. It **paints from the active desktop's beacon
