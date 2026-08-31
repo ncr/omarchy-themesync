@@ -82,9 +82,11 @@ off  size  field
 
 **Time.** The daemon re-signs and re-registers the advertisement at every wall-clock second
 change, so the stamp in the air is at most ~1 s stale (plus the ≤ 40 ms advertising gap);
-a receiver may treat it as "now" with a one-second error bar and set its RTC from it (the
-watch does, when the drift exceeds a few seconds — which is why the refresh cannot be
-slower: a stamp refreshed every 10 s would look like 10 s of drift on a healthy clock).
+a receiver may treat it as "now" with a one-second error bar and set its RTC from it. The
+watch does: it uses only a sample less than 2 s old (age since reception), corrects past a
+drift of 5 s, at most once an hour — immediately when the drift is 60 s or more. That 5 s
+threshold is why the refresh cannot be slower: a stamp refreshed every 10 s would look
+like 10 s of drift on a healthy clock.
 Local civil time on purpose — the watch face shows what the desktop's clock shows, no time
 zone database on either side; DST jumps arrive as a one-hour "drift" and are corrected like
 any other. Out-of-range years saturate at 2000/2255; a leap second is sent as :59.
