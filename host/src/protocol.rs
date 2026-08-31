@@ -551,12 +551,22 @@ pub const V2_MAX_NAME: usize = 31;
 pub const V2_TAG_MAC: u8 = 0x42;
 pub const V2_MAC_LEN: usize = 4;
 pub const V2_TAG_ECHO: u8 = 0x43;
+/// Beacon-only meta record: the desktop's local civil time (BEACON.md §1), 7 bytes.
+pub const V2_TAG_TIME: u8 = 0x44;
 
 /// Append the `0x43` echo record to a beacon packet (before the mac).
 pub fn v2_append_echo(packet: &mut Vec<u8>, ctr: u16) {
     packet.push(V2_TAG_ECHO);
     packet.push(2);
     packet.extend_from_slice(&ctr.to_le_bytes());
+}
+
+/// Append the `0x44` time record to a beacon packet (BEACON.md §1):
+/// `[year-2000][month 1-12][day][hour][min][sec][weekday 0-6 = Sunday..Saturday]`.
+pub fn v2_append_time(packet: &mut Vec<u8>, t: &[u8; 7]) {
+    packet.push(V2_TAG_TIME);
+    packet.push(7);
+    packet.extend_from_slice(t);
 }
 
 /// Append the `0x42` mac record to a beacon packet.
@@ -579,7 +589,7 @@ pub fn v2_theme_end(b: &[u8]) -> usize {
         if tag < 0x40 {
             i += 4;
         } else {
-            if tag == V2_TAG_MAC || tag == V2_TAG_ECHO {
+            if tag == V2_TAG_MAC || tag == V2_TAG_ECHO || tag == V2_TAG_TIME {
                 return i;
             }
             if i + 2 > b.len() {

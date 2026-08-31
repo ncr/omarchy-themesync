@@ -115,37 +115,74 @@ pub fn decode_request_with(active: Option<&[u8; KEY_LEN]>, pending: Option<&[u8;
     Err(last)
 }
 
-/// `[magic][kind=state][theme v2 TLV][0x43 2 echo][0x42 4 mac]` — `echo` is the last request
+/// The desktop's local civil time for the `0x44` beacon record:
+/// `[year-2000][month 1-12][day][hour][min][sec][weekday 0-6 = Sunday..Saturday]`.
+/// Civil local time on purpose: the watch face shows what the desktop's clock shows, and
+/// neither side needs a time zone database. Out-of-range years saturate; a leap second
+/// reads as :59.
+#[cfg(unix)]
+pub fn local_time_record() -> [u8; 7] {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let t = now.as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    [
+        (tm.tm_year - 100).clamp(0, 255) as u8, // tm_year counts from 1900
+        (tm.tm_mon + 1) as u8,
+        tm.tm_mday as u8,
+        tm.tm_hour as u8,
+        tm.tm_min as u8,
+        tm.tm_sec.min(59) as u8,
+        tm.tm_wday as u8,
+    ]
+}
+
+/// `[magic][kind=state][theme v2 TLV][0x43 2 echo]([0x44 7 time])[0x42 4 mac]` — `echo` is the last request
 /// counter accepted (the watch's ack number), the mac covers everything before its record
 /// (BEACON.md §1). `theme` must be a v2 packet without meta records.
-pub fn encode_state(key: &[u8], theme: &[u8], echo: u16) -> Vec<u8> {
-    let mut v = Vec::with_capacity(2 + theme.len() + 4 + 2 + MAC_LEN);
+pub fn encode_state(key: &[u8], theme: &[u8], echo: u16, time: Option<&[u8; 7]>) -> Vec<u8> {
+    let mut v = Vec::with_capacity(2 + theme.len() + 4 + 9 + 2 + MAC_LEN);
     v.extend_from_slice(&[MAGIC, KIND_STATE]);
     v.extend_from_slice(theme);
     protocol::v2_append_echo(&mut v, echo);
+    if let Some(t) = time {
+        protocol::v2_append_time(&mut v, t);
+    }
     let mac = mac4(key, &v);
     protocol::v2_append_mac(&mut v, &mac);
     v
 }
 
-/// The receiver's view of a state beacon: the theme bytes (what the apply rule hashes) and
-/// the echo, if the packet is ours and the mac verifies.
+/// The receiver's view of a state beacon: the theme bytes (what the apply rule hashes),
+/// the echo, and the time record when present — if the packet is ours and the mac verifies.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn decode_state<'a>(key: &[u8], b: &'a [u8]) -> Result<(&'a [u8], u16), RequestError> {
+pub fn decode_state<'a>(key: &[u8], b: &'a [u8]) -> Result<(&'a [u8], u16, Option<[u8; 7]>), RequestError> {
     if b.len() < 2 || b[0] != MAGIC || b[1] != KIND_STATE {
         return Err(RequestError::NotARequest);
     }
     let theme = &b[2..];
     let end = protocol::v2_theme_end(theme);
     let meta = &theme[end..];
-    // fixed tail: [0x43 2 echo][0x42 4 mac]
-    if meta.len() != 4 + 2 + MAC_LEN || meta[0] != protocol::V2_TAG_ECHO || meta[1] != 2 || meta[4] != protocol::V2_TAG_MAC || meta[5] as usize != MAC_LEN {
+    // tail: [0x43 2 echo], an optional [0x44 7 time], then [0x42 4 mac] last.
+    let with_time = meta.len() == 4 + 9 + 2 + MAC_LEN;
+    if !(with_time || meta.len() == 4 + 2 + MAC_LEN) || meta[0] != protocol::V2_TAG_ECHO || meta[1] != 2 {
         return Err(RequestError::BadLength(b.len()));
     }
-    if !mac_eq(&mac4(key, &b[..b.len() - MAC_LEN - 2]), &meta[6..]) {
+    let (time, mac_rec) = if with_time {
+        if meta[4] != protocol::V2_TAG_TIME || meta[5] != 7 {
+            return Err(RequestError::BadLength(b.len()));
+        }
+        (Some(<[u8; 7]>::try_from(&meta[6..13]).unwrap()), &meta[13..])
+    } else {
+        (None, &meta[4..])
+    };
+    if mac_rec[0] != protocol::V2_TAG_MAC || mac_rec[1] as usize != MAC_LEN {
+        return Err(RequestError::BadLength(b.len()));
+    }
+    if !mac_eq(&mac4(key, &b[..b.len() - MAC_LEN - 2]), &mac_rec[2..]) {
         return Err(RequestError::BadMac);
     }
-    Ok((&theme[..end], u16::from_le_bytes([meta[2], meta[3]])))
+    Ok((&theme[..end], u16::from_le_bytes([meta[2], meta[3]]), time))
 }
 
 /// The watch names the theme it wants (`Set`, by slug crc); there is no relative stepping —
@@ -509,13 +546,13 @@ mod tests {
     #[test]
     fn state_beacon_is_theme_plus_mac() {
         let theme = [2u8, 1, 10, 20, 30, 2, 40, 50, 60];
-        let s = encode_state(&KEY, &theme, 0x0102);
+        let s = encode_state(&KEY, &theme, 0x0102, None);
         assert_eq!(&s[..2], &[MAGIC, KIND_STATE]);
         assert_eq!(&s[2..2 + theme.len()], &theme);
         assert_eq!(s.len(), 2 + theme.len() + 4 + 2 + MAC_LEN);
         assert!(is_ours(&s));
         assert!(!is_ours(&[0x00, 0x01]));
-        assert_eq!(decode_state(&KEY, &s), Ok((&theme[..], 0x0102)));
+        assert_eq!(decode_state(&KEY, &s), Ok((&theme[..], 0x0102, None)));
         assert_eq!(decode_state(&[8; 16], &s), Err(RequestError::BadMac));
         let mut t = s.clone(); t[4] ^= 1; // a colour byte
         assert_eq!(decode_state(&KEY, &t), Err(RequestError::BadMac));
@@ -528,9 +565,30 @@ mod tests {
         assert_eq!(d.echo, Some(0x0102));
         assert_eq!(d.mac, Some(mac4(&KEY, &s[..s.len() - 6])));
         // a different echo changes the mac but not the theme bytes the watch hashes
-        let s2 = encode_state(&KEY, &theme, 0x0103);
+        let s2 = encode_state(&KEY, &theme, 0x0103, None);
         assert_eq!(protocol::v2_theme_end(&s2[2..]), theme.len());
         assert_ne!(s2, s);
+        // with the time record: same theme bytes, time reported, mac covers the time
+        let t = [26u8, 8, 31, 13, 5, 9, 1];
+        let timed = encode_state(&KEY, &theme, 0x0102, Some(&t));
+        assert_eq!(timed.len(), s.len() + 9);
+        assert_eq!(protocol::v2_theme_end(&timed[2..]), theme.len());
+        assert_eq!(decode_state(&KEY, &timed), Ok((&theme[..], 0x0102, Some(t))));
+        let mut flip = timed.clone();
+        flip[2 + theme.len() + 4 + 3] ^= 1; // a byte inside the time record
+        assert_eq!(decode_state(&KEY, &flip), Err(RequestError::BadMac));
+        // a mangled time length is a framing error, not a mac check
+        let mut short = vec![MAGIC, KIND_STATE];
+        short.extend_from_slice(&theme);
+        protocol::v2_append_echo(&mut short, 0x0102);
+        short.extend_from_slice(&[protocol::V2_TAG_TIME, 6, 26, 8, 31, 13, 5, 9]);
+        let m = mac4(&KEY, &short);
+        protocol::v2_append_mac(&mut short, &m);
+        assert_eq!(decode_state(&KEY, &short), Err(RequestError::BadLength(short.len())));
+        // local_time_record is sane whatever the wall clock says
+        let now = local_time_record();
+        assert!((1..=12).contains(&now[1]) && (1..=31).contains(&now[2]));
+        assert!(now[3] < 24 && now[4] < 60 && now[5] < 60 && now[6] < 7);
     }
 
     /// Interop anchors shared with the watch firmware (BEACON.md §4): key 00 01 .. 0f.
@@ -549,12 +607,16 @@ mod tests {
         assert_eq!(Op::from_code(0), None);
 
         let theme = protocol::from_hex("02011020300240506040046e6f7264410100").unwrap();
-        let beacon = encode_state(&key, &theme, 0);
+        let beacon = encode_state(&key, &theme, 0, None);
         assert_eq!(protocol::to_hex(&beacon), "540102011020300240506040046e6f72644101004302000042044cdcbd41");
-        let beacon1 = encode_state(&key, &theme, 1);
+        let beacon1 = encode_state(&key, &theme, 1, None);
         assert_eq!(protocol::to_hex(&beacon1), "540102011020300240506040046e6f7264410100430201004204caa53127");
         assert_eq!(beacon.len(), 30);
         assert_eq!(decode_state(&key, &beacon1).unwrap().1, 1);
+        // 2026-08-31 13:05:09, a Monday (BEACON.md §1's time vector)
+        let timed = encode_state(&key, &theme, 1, Some(&[26, 8, 31, 13, 5, 9, 1]));
+        assert_eq!(protocol::to_hex(&timed), "540102011020300240506040046e6f72644101004302010044071a081f0d0509014204e28aefc0");
+        assert_eq!(decode_state(&key, &timed).unwrap().2, Some([26, 8, 31, 13, 5, 9, 1]));
         assert_eq!(crc16(&theme), 0xD5E2);
     }
 
@@ -584,7 +646,8 @@ mod tests {
         let mut corpus: Vec<Vec<u8>> = Vec::new();
         let valid = [
             encode_request(&key, Request { ctr: 1, op: Op::Set, arg: 0xAAE5 }).to_vec(),
-            encode_state(&key, &theme, 1),
+            encode_state(&key, &theme, 1, None),
+            encode_state(&key, &theme, 1, Some(&[26, 8, 31, 13, 5, 9, 1])),
             theme.clone(),
             crate::themelist::encode_list(&[theme.clone()]).unwrap(),
             crate::themelist::ListStatus { version: crate::themelist::STATUS_VERSION, count: 1, crc: 1, on_sd: false, loaded: true, nonce: 5 }.encode().to_vec(),
@@ -639,7 +702,7 @@ mod tests {
     fn state_beacon_conformance() {
         let key: Vec<u8> = (0u8..16).collect();
         let theme = protocol::from_hex("02011020300240506040046e6f7264410100").unwrap();
-        let good = encode_state(&key, &theme, 7);
+        let good = encode_state(&key, &theme, 7, None);
         // no mac record at all
         let mut no_mac = vec![MAGIC, KIND_STATE];
         no_mac.extend_from_slice(&theme);
@@ -668,10 +731,27 @@ mod tests {
         let m = mac4(&key, &dup);
         protocol::v2_append_mac(&mut dup, &m);
         assert!(decode_state(&key, &dup).is_err());
-        // the theme bytes the watch hashes do not move with the echo
-        let (t7, e7) = decode_state(&key, &good).unwrap();
-        let other = encode_state(&key, &theme, 8);
-        let (t8, e8) = decode_state(&key, &other).unwrap();
+        // time in the wrong place: before the echo
+        let mut early = vec![MAGIC, KIND_STATE];
+        early.extend_from_slice(&theme);
+        protocol::v2_append_time(&mut early, &[26, 8, 31, 13, 5, 9, 1]);
+        protocol::v2_append_echo(&mut early, 7);
+        let m = mac4(&key, &early);
+        protocol::v2_append_mac(&mut early, &m);
+        assert!(decode_state(&key, &early).is_err());
+        // a duplicate time record
+        let mut twice = vec![MAGIC, KIND_STATE];
+        twice.extend_from_slice(&theme);
+        protocol::v2_append_echo(&mut twice, 7);
+        protocol::v2_append_time(&mut twice, &[26, 8, 31, 13, 5, 9, 1]);
+        protocol::v2_append_time(&mut twice, &[26, 8, 31, 13, 5, 9, 1]);
+        let m = mac4(&key, &twice);
+        protocol::v2_append_mac(&mut twice, &m);
+        assert!(decode_state(&key, &twice).is_err());
+        // the theme bytes the watch hashes move with neither the echo nor the time
+        let (t7, e7, _) = decode_state(&key, &good).unwrap();
+        let other = encode_state(&key, &theme, 8, Some(&[26, 8, 31, 13, 5, 9, 2]));
+        let (t8, e8, _) = decode_state(&key, &other).unwrap();
         assert_eq!((t7, e7), (&theme[..], 7));
         assert_eq!((t8, e8), (&theme[..], 8));
         assert_eq!(crc16(t7), crc16(t8));
@@ -681,8 +761,8 @@ mod tests {
         big.push(protocol::V2_TAG_NAME); big.push(31); big.extend_from_slice(&[b'x'; 31]);
         big.extend_from_slice(&[protocol::V2_TAG_FLAGS, 1, 0]);
         assert_eq!(check_theme(&big), Ok(()));
-        let wire = encode_state(&key, &big, u16::MAX);
-        assert!(wire.len() <= MAX_THEME_LEN + 2 + 4 + 6);
+        let wire = encode_state(&key, &big, u16::MAX, Some(&local_time_record()));
+        assert!(wire.len() <= MAX_THEME_LEN + 2 + 4 + 9 + 6);
         assert!(wire.len() + 4 <= 254, "manufacturer data + AD header must fit one extended advertising PDU");
         assert_eq!(decode_state(&key, &wire).unwrap().0, &big[..]);
     }

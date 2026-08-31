@@ -74,9 +74,11 @@ async fn current_theme() -> Result<(String, Vec<u8>)> {
 /// The state beacon for this theme and this echo (the last request counter accepted) —
 /// empty when there is no key yet, because a beacon without a MAC is one no paired watch
 /// would apply.
+/// Stamped with the local time of this call (BEACON.md §1, the `0x44` record); the main
+/// loop rebuilds the beacon every second so the stamp in the air never goes stale.
 fn sign(key: Option<&Key>, v2: &[u8], echo: u16) -> Vec<u8> {
     match key {
-        Some(k) if !v2.is_empty() => beacon::encode_state(k, v2, echo),
+        Some(k) if !v2.is_empty() => beacon::encode_state(k, v2, echo, Some(&beacon::local_time_record())),
         _ => Vec::new(),
     }
 }
@@ -554,6 +556,14 @@ pub async fn run(opts: Options) -> Result<()> {
     let mut republish = tokio::time::interval(REPUBLISH_EVERY);
     republish.tick().await; // the first tick fires immediately; the beacon is already up
     loop {
+        // The beacon carries the wall clock (the `0x44` record): re-sign and re-register it
+        // at every second change, so the stamp in the air is at most ~1 s old. The watch
+        // corrects its RTC on a drift of a few seconds — a staler stamp would trip that
+        // on a healthy clock. Cost: two D-Bus calls a second.
+        let next_second = async {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            tokio::time::sleep(Duration::from_nanos(1_000_000_000 - u64::from(now.subsec_nanos()))).await
+        };
         let pending_expiry = async {
             match pending {
                 Some((_, since)) => tokio::time::sleep_until(tokio::time::Instant::from_std(since + beacon::PENDING_KEY_TTL)).await,
@@ -566,6 +576,15 @@ pub async fn run(opts: Options) -> Result<()> {
                 // daemon without it looks alive and does nothing useful. Exit; systemd restarts.
                 let why = match r { Ok(Ok(())) => "socket server returned".to_string(), Ok(Err(e)) => format!("{e:#}"), Err(e) => format!("socket task panicked: {e}") };
                 anyhow::bail!("{why}");
+            }
+            _ = next_second, if beacon_up && !theme_wire.is_empty() => {
+                theme_wire = sign(key.as_ref(), &theme_v2, ctr_last);
+                if let Err(e) = radio.set_beacon(theme_wire.clone(), INTERVAL).await {
+                    // Hand recovery to the republish timer: publish() there logs, retries
+                    // and reopens the adapter; a per-second error would spam the journal.
+                    log(&format!("beacon: time refresh failed ({e:#}); the republish timer takes over"));
+                    beacon_up = false;
+                }
             }
             _ = republish.tick() => {
                 if theme_v2.is_empty() {

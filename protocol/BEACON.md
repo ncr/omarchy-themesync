@@ -70,10 +70,24 @@ off  size  field
                      them to theme_set_wire() unchanged. The 0x40 name is the theme SLUG.
  2+n  4    echo      [0x43][2][ctr u16 le] — the last request counter the desktop accepted
                      under this key, 0 = none yet. The sender's ack number (§2).
- 6+n  6    mac       [0x42][4][mac4(k, bytes 0 .. 6+n)] — always the last record; covers
-                     everything before it, the echo included.
-                     Both are meta records the theme parser skips. ~80 bytes in total.
+ 6+n  9    time      [0x44][7][year-2000][month 1-12][day][hour][min][sec][wday 0-6]
+                     — the desktop's local civil wall clock at the moment the payload was
+                     built, weekday 0 = Sunday. Optional: a receiver must accept a beacon
+                     without it (and one with it: firmware older than the record skips
+                     unknown tags ≥ 0x40 and only requires the mac to be last).
+15+n  6    mac       [0x42][4][mac4(k, everything before it)] — always the last record;
+                     covers everything before it, the echo and the time included.
+                     All three are meta records the theme parser skips. ~89 bytes in total.
 ```
+
+**Time.** The daemon re-signs and re-registers the advertisement at every wall-clock second
+change, so the stamp in the air is at most ~1 s stale (plus the ≤ 40 ms advertising gap);
+a receiver may treat it as "now" with a one-second error bar and set its RTC from it (the
+watch does, when the drift exceeds a few seconds — which is why the refresh cannot be
+slower: a stamp refreshed every 10 s would look like 10 s of drift on a healthy clock).
+Local civil time on purpose — the watch face shows what the desktop's clock shows, no time
+zone database on either side; DST jumps arrive as a one-hour "drift" and are corrected like
+any other. Out-of-range years saturate at 2000/2255; a leap second is sent as :59.
 
 **Apply rule (receiver).** Let `crc = crc16(bytes 2 .. 2+n)` (the theme bytes only — the
 echo changes with every request, the theme does not).
@@ -101,7 +115,10 @@ and two desktops in range (only one has the key) all converge on the content.
 not a nonce), so a beacon recorded under the current key stays valid: a stranger who
 recorded two beacons can alternate them and the watch follows — the worst outcome is a
 theme the desktop once had, until the real beacon (≤ 1 s away with the screen on) wins
-again. The MAC stops forgery, not replay; the 10 s stability window and the 60 s NVS floor
+again. The same goes for the time record: a replayed beacon carries the clock of its
+recording, so the watch bounds the damage on its side — it corrects the RTC only past a
+drift threshold, rate-limits corrections, and the next real beacon (seconds away) sets the
+clock right again. The MAC stops forgery, not replay; the 10 s stability window and the 60 s NVS floor
 bound the flash cost of a replay to one write a minute. A counter under the MAC would close
 this; it is not worth a persisted state on the watch for a nuisance.
 
@@ -479,7 +496,9 @@ request  LIST, ctr 3                              54 03 03 00 03 00 00 ea 01 ce 
 beacon   theme: bg 10 20 30, fg 40 50 60, name "nord", flags 0
          echo 0:  54 01 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00 43 02 00 00 | 42 04 4c dc bd 41
          echo 1:  54 01 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00 43 02 01 00 | 42 04 ca a5 31 27
-         theme crc16 (the apply rule's key) = 0xD5E2 for both           30 bytes
+         echo 1, time 2026-08-31 13:05:09 Monday:
+                  54 01 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00 43 02 01 00 | 44 07 1a 08 1f 0d 05 09 01 | 42 04 e2 8a ef c0
+         theme crc16 (the apply rule's key) = 0xD5E2 for all three      30 / 39 bytes
 
 list     01 01 12 02 01 10 20 30 02 40 50 60 40 04 6e 6f 72 64 41 01 00     (21 B)
          crc16 0xDB97
@@ -494,6 +513,7 @@ COMMIT   03 00 7f 0f 8a          mac4(k, 03 ‖ 04 03 02 01 ‖ 15 00 ‖ 97 db 
 Settled by the user:
 - 2026-08-26: no time in any packet (the watch RTC loses time on power-off). Two-way over
   advertising, no GATT session in daily use. The watch's v2 TLV is the shared theme format.
+  (The "no time" half was reversed on 2026-08-31 — see below; the rest stands.)
 - 2026-08-27 (morning): the watch names the theme (SET by slug crc); no NEXT/PREV; the watch
   shows prev | current | next from its own list; greenfield — wire bytes may be renumbered.
 - 2026-08-27 (v3): a counter is fine (it is not a clock and needs no sync beyond pairing);
@@ -511,6 +531,12 @@ Settled by the user:
   recorded push replayed); beacon replay is accepted and written down, with a 60 s floor on
   NVS writes; the request MAC is checked first and `arg = 0` is enforced; the pending key
   expires after 120 s on the desktop too.
+- 2026-08-31: the beacon carries the desktop's wall clock after all (the `0x44` record, §1),
+  so the watch RTC no longer depends on the build time — the earlier "no time in any packet"
+  predates the RTC being used for a clock face. Optional record between echo and mac, under
+  the mac; the daemon re-signs every second so the stamp never goes stale; older firmware
+  skips it. The watch corrects its RTC only past a drift threshold and rate-limits the
+  corrections (its side of §1's replay note).
 
 Open, in the order they should be taken:
 1. **Pairing hardening**: accept the `…0005` write only within ~60 s of the user opening

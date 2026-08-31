@@ -6,6 +6,12 @@ reviews that shaped v0.1 are `review-2026-08-27.md` (protocol) and
 
 ## Unreleased (v0.1.0 candidate)
 
+- The beacon carries the desktop's local wall clock (`0x44` time record, BEACON.md §1),
+  so the watch can set its RTC off the air instead of trusting its build time. The daemon
+  re-signs and re-registers the advertisement at every second change (~1 s worst-case
+  staleness; two D-Bus calls a second) — slower would read as drift on the watch, whose
+  threshold is a few seconds. Optional record: firmware that predates it skips the tag.
+
 - A widget for the Omarchy bar (`shell/io.github.ncr.themesync`): a watch mark that is lit
   while the beacon is on the air and a watch is paired, red when the daemon needs a person;
   its panel shows the daemon's state and sends the theme or the theme list again. It talks
