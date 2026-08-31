@@ -538,7 +538,9 @@ Settled by the user:
   predates the RTC being used for a clock face. Optional record between echo and mac, under
   the mac; the daemon re-signs every second so the stamp never goes stale; older firmware
   skips it. The watch corrects its RTC only past a drift threshold and rate-limits the
-  corrections (its side of §1's replay note).
+  corrections (its side of §1's replay note). Verified on hardware the same day: the watch
+  logs `beacon time: 2026-08-31 08:47:34 wd1, age 21 ms, drift +0 s` — the seconds tick
+  from the air — and still applies the theme from the 89-byte beacon.
 
 Open, in the order they should be taken:
 1. **Pairing hardening**: accept the `…0005` write only within ~60 s of the user opening
