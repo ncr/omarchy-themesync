@@ -53,7 +53,11 @@ Panel {
   // nf-md-watch; the same mark in the bar and in the panel's hero.
   readonly property string watchGlyph: "\u{f0589}"
 
-  readonly property real openPanelIndicatorWidth: button.labelWidth
+  // The bar mark is drawn, not a font glyph: the icon glyph comes from whatever fallback
+  // font serves the private-use codepoint, with side bearings no QML metric reports
+  // reliably, and its ink sat ~1 px right of the slot-centred underline. Shapes are
+  // centred by construction, at every theme font and scale.
+  readonly property real openPanelIndicatorWidth: barMark.width
 
   visible: !hidden
   implicitWidth: hidden ? 0 : button.implicitWidth
@@ -214,9 +218,16 @@ Panel {
     bar: root.bar
     text: root.watchGlyph
     fontSize: Style.font.icon
+    labelVisible: false  // the WatchMark below draws the icon; text only sizes the slot
     active: root.trouble
     dimmed: !root.trouble && !(root.daemonUp && root.paired && root.onAir)
     tooltipText: ""
+
+    WatchMark {
+      id: barMark
+      anchors.centerIn: parent
+      color: button.active ? button.activeColor : button.foreground
+    }
 
     onPressed: function(b) {
       if (b === Qt.RightButton) root.act("sync")
@@ -263,11 +274,9 @@ Panel {
           fontFamily: root.fontFamily
 
           iconComponent: Component {
-            Text {
-              text: root.watchGlyph
+            WatchMark {
+              size: Style.font.display
               color: root.trouble ? root.urgent : root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.display
             }
           }
         }
@@ -419,6 +428,50 @@ Panel {
           wrapMode: Text.WordWrap
         }
       }
+    }
+  }
+
+  // A wristwatch, drawn: two strap stubs and a ring, the same proportions as nf-md-watch.
+  component WatchMark: Item {
+    id: mark
+    property color color: root.foreground
+    // Height; everything else derives from it. Follows the user's font scale.
+    property real size: Style.spaceReal(15)
+
+    implicitWidth: Math.round(size * 0.72)
+    implicitHeight: Math.round(size)
+    readonly property int strapWidth: Math.round(implicitWidth * 0.62)
+    readonly property int strapHeight: Math.max(2, Math.round(size * 0.17))
+
+    Behavior on color {
+      enabled: !root.bar || root.bar.foregroundAnimationEnabled
+      ColorAnimation { duration: 160 }
+    }
+
+    Rectangle {
+      anchors.top: parent.top
+      anchors.horizontalCenter: parent.horizontalCenter
+      width: mark.strapWidth
+      height: mark.strapHeight
+      color: mark.color
+    }
+
+    Rectangle {
+      anchors.bottom: parent.bottom
+      anchors.horizontalCenter: parent.horizontalCenter
+      width: mark.strapWidth
+      height: mark.strapHeight
+      color: mark.color
+    }
+
+    Rectangle {
+      anchors.centerIn: parent
+      width: mark.implicitWidth
+      height: width
+      radius: width / 2
+      color: "transparent"
+      border.color: mark.color
+      border.width: Math.max(1.4, mark.size * 0.11)
     }
   }
 
