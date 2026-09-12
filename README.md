@@ -186,6 +186,10 @@ docs/                        changelog, the two reviews, omarchy.md (Omarchy int
 
 ## Development
 
+The [small-device theme proposal](docs/theme-standard-proposal.md) sketches
+on-demand binary palettes for wearables and constrained links such as LoRa.
+It is a discussion draft, separate from the deployed BLE protocol.
+
 ```bash
 cd host && cargo build && cargo test           # 45 tests: codecs, MAC, vectors, list, mapping, resolver parity, sim
 cargo run -- theme --file tests/fixtures/tokyo-night.toml --contrast
