@@ -15,3 +15,8 @@ To work on it: `ln -s $PWD/shell/io.github.ncr.themesync ~/.config/omarchy/plugi
 `omarchy-shell shell rescanPlugins`; the shell reloads the plugin on every save
 (`themesync install` leaves a symlink alone). Omarchy's validator rejects symlinks, so the
 release path is always the copy.
+
+The panel separates Ulanzi Wi-Fi, saved watch pairing and desktop broadcasting.
+Status rows reserve a label column and a scaled 16 px gap; long values wrap within
+the value column. Watch actions name their destination explicitly. If a running
+shell keeps an older component after rescanning, restart it with `omarchy restart shell`.

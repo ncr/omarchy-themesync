@@ -131,7 +131,7 @@ Panel {
   function scanLabel() {
     if (!info) return "—"
     var s = String(info.scan)
-    if (s === "on" && info.monitor === true) return "on, with the advertisement monitor"
+    if (s === "on" && info.monitor === true) return "on · monitor"
     return s
   }
 
@@ -141,7 +141,7 @@ Panel {
     if (!info) return "daemon up"
     if (info.ctr_locked === true) return "counter locked — see below"
     if (info.beacon === "off_air") return "beacon off the air"
-    return String(info.pairing) + " · beacon " + String(info.beacon)
+    return "desktop theme service running"
   }
 
   // One request per connection, like the CLI: connect, write the line, read the reply,
@@ -318,9 +318,22 @@ Panel {
           }
           StatRow {
             visible: !!root.info && !!root.info.ulanzi
-            label: "Scene · paid today"
-            value: root.info && root.info.ulanzi ? String(root.info.ulanzi.scene || root.info.ulanzi.season || "garden") + (root.info.ulanzi.paid_today !== undefined ? " · " + root.info.ulanzi.paid_today : "") : ""
+            label: "Scene"
+            value: root.info && root.info.ulanzi ? String(root.info.ulanzi.scene || root.info.ulanzi.season || "garden") : ""
           }
+          StatRow {
+            visible: !!root.info && !!root.info.ulanzi && root.info.ulanzi.paid_today !== undefined
+            label: "Paid today"
+            value: root.info && root.info.ulanzi ? String(root.info.ulanzi.paid_today) : ""
+          }
+        }
+
+        PanelSeparator { visible: !!root.info && !!root.info.ulanzi; foreground: root.foreground }
+
+        Column {
+          width: parent.width
+          visible: !!root.info
+          spacing: Style.space(6)
           PanelSectionHeader {
             width: parent.width
             text: "WATCH"
@@ -385,7 +398,7 @@ Panel {
           }
           StatRow {
             label: "Protocol"
-            value: root.info ? String(root.info.protocol) : ""
+            value: root.info ? String(root.info.protocol).replace("list status", "list").replace(", ", " · ") : ""
           }
         }
 
@@ -410,7 +423,7 @@ Panel {
           spacing: Style.space(8)
 
           Button {
-            text: root.acting === "sync" ? "Sending…" : "Send theme"
+            text: root.acting === "sync" ? "Sending…" : "Send watch theme"
             iconText: "\u{f048a}"  // nf-md-send
             tooltipText: "Read the current Omarchy theme again and put it on the air (also: right-click the mark, or S)"
             foreground: root.foreground
@@ -420,7 +433,7 @@ Panel {
           }
 
           Button {
-            text: root.acting === "push_list" ? "Pushing…" : "Push theme list"
+            text: root.acting === "push_list" ? "Pushing…" : "Watch theme list"
             iconText: "\u{f0279}"  // nf-md-format_list_bulleted
             tooltipText: "Send the installed themes to the watch over GATT, even if it already has this list (L)"
             foreground: root.foreground
@@ -506,11 +519,15 @@ Panel {
     property bool alarming: false
 
     width: parent ? parent.width : 0
+    readonly property real labelWidth: Math.min(width * 0.36, Style.space(112))
+    readonly property real columnGap: Style.space(16)
     implicitHeight: Math.max(labelText.implicitHeight, valueText.implicitHeight)
 
     Text {
       id: labelText
       text: row.label
+      width: row.labelWidth
+      wrapMode: Text.Wrap
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
@@ -524,12 +541,12 @@ Panel {
       color: row.alarming ? root.urgent : root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
-      anchors.left: labelText.right
-      anchors.leftMargin: Style.spacing.md
+      anchors.left: parent.left
+      anchors.leftMargin: row.labelWidth + row.columnGap
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       horizontalAlignment: Text.AlignRight
-      elide: Text.ElideMiddle
+      wrapMode: Text.Wrap
     }
   }
 }

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.ncr.themesync",
   "name": "Themesync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Jacek Becela",
   "license": "MIT",
-  "description": "The themesync daemon in the Omarchy bar: whether the theme beacon is on the air and the watch is paired, the last request from the watch, and buttons to send the theme or the theme list again.",
+  "description": "Desktop theme sync with separate Ulanzi Wi-Fi, saved watch pairing and desktop broadcaster status.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Themesync",
-    "description": "A watch mark: lit while the beacon is on the air and a watch is paired, dimmed otherwise, red when the daemon needs attention. The panel shows the daemon's state and can send the theme or the theme list again.",
+    "description": "A watch mark: lit while the beacon is on the air and a watch is paired, dimmed otherwise, red when the daemon needs attention. The panel separates Ulanzi Wi-Fi, saved watch pairing and desktop broadcasting, with theme and theme-list actions.",
     "category": "Devices",
     "aliases": [
       "themesync",
