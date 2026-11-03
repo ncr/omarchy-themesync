@@ -1,6 +1,6 @@
 # Ulanzi paid-order scenes
 
-Six scenes run **on the TC002 itself**, at native 52×16 RGB888, about 8 fps:
+Six scenes run **on the TC002 itself**, at native 52×16 RGB888, a 60-fps output cadence (order-world movement remains deliberately slow):
 `city`, `rail`, `orbit`, `vinyl`, `maker`, `garden`. `renderer.js` is the same v5 source as the approved browser preview. QuickJS executes it locally; the host never streams animation frames over Wi-Fi.
 
 The desktop accent recolours structural elements and the counter in every scene.
@@ -64,7 +64,7 @@ Verified:
 - All six actual device screen RGB buffers matched the engine buffers exactly, 832/832 pixels each; captures are in the deployment output `live-*-52x16.png`.
 - Evdev injection through the real device kernel confirmed −/+, clock toggle, both encoder directions and encoder click replay; the real count remained unchanged and the previous brightness was restored.
 
-The broader upstream native test suite currently reports 692/694 passing: an unused-byte comparison in the log-message roundtrip fixture fails and the TLS-worker test aborts in Zig's ML-KEM stack. Neither is used by this plaintext local frame path; no claim of a wholly green native suite is made.
+Baseline validation of the broader upstream native suite reported 692/694 passing: an unused-byte comparison in the log-message roundtrip fixture fails and the TLS-worker test aborts in Zig's ML-KEM stack. Neither is used by this plaintext local frame path; no claim of a wholly green native suite is made.
 
 Rollback: stop the paid-order service, stop storyd, restore the recorded runtime configuration and previous ThemeSync binary/config. A power cycle without the host restores the stock Ulanzi application. There is no firmware flash to undo.
 
@@ -72,9 +72,24 @@ Rollback: stop the paid-order service, stop storyd, restore the recorded runtime
 ## Omarchy / Tiny Compo
 
 `demos.js` adds 20 distinct deterministic animations at native 52×16, rendered locally
-by the same QuickJS engine at about 8 fps. Structural colours follow the active
-Omarchy accent and secondary colour; semantic colours remain readable. No audio,
-network assets, full-screen strobe or bitmap resampling is involved.
+by QuickJS at a target of **60 fps**. A native C rasterizer samples geometry and
+procedural fields on a **4×4 grid per physical pixel**, then reduces coverage to
+52×16 RGB888. Subpixel movement, lines, ellipses, metaball contours and the
+perspective floor receive actual spatial antialiasing; integer-position pixel
+lettering stays sharp. This is not CSS smoothing of an enlarged preview.
+
+The complete named Omarchy palette supplies foreground, selection, red, green,
+blue, yellow, orange and magenta as well as accent/secondary. Exact RGB values and
+derived shades survive; changing a non-accent colour also synchronizes. The dark
+unoccupied background remains off. No audio, network assets or full-screen strobe.
+
+Continuous HTTP frames have an independent 90-Hz admission budget (60-Hz producer
+plus scheduling margin); discrete frames retain their 10-Hz limit. Continuous
+streams use a linear coverage LUT with the same full-intensity brightness peak as
+the legacy curve, avoiding its artificial minimum-channel lift. Clock/discrete
+rendering retains the legacy curve. The loop uses absolute 60-Hz deadlines and
+reports measured `fps`, `target_fps`, `render_ms`, and `antialias_samples` in `/status`.
+`render_ms` includes the local HTTP handoff, not just rasterization.
 
 ```
 themesync ulanzi demo                 # automatic 20-entry show (~6 min 37 s)
@@ -96,11 +111,11 @@ and autoplay preference survive engine restart. Automatic advances do not write 
 The C host loads sibling `demos.js` between `renderer.js` and `device.js`; older
 installations without it retain order scenes and reject unavailable demo commands.
 `ensure_runtime.py` installs all four files. `POST /demo` accepts an optional `id`,
-`autoplay` boolean and `enabled:false` to leave the show; `GET /demos` returns the
+`autoplay` boolean, optional `time` in seconds and `paused` boolean for frame inspection, and `enabled:false` to leave the show; `GET /demos` returns the
 20-entry catalogue. The existing authenticated API and fixed-buffer limits apply.
 
 Browser gallery: `devices/ulanzi/compo/index.html` is a self-contained preview with
-all 20 entries, seek, play/pause, autoplay, six palette presets and optional LED grid.
+all 20 entries, seek, play/pause, autoplay, six actual Omarchy palette presets, 8/30/60 FPS comparison, an AA toggle and optional LED grid. Static thumbnails are cached; animated thumbnails run at 10 fps independently of the main 60-fps preview.
 It contains no clock/API credentials and does not control the hardware.
 Rebuild it with `python3 devices/ulanzi/compo/build.py`.
 
@@ -112,8 +127,24 @@ node export.cjs
 python3 render_previews.py
 ```
 
-`test-compo.cjs` samples all 2992 loop frames, checks distinct motion, bounds and
-LED-safe channels, then exercises autoplay without flash writes, selection, mode
+`test-compo.cjs` samples 2992 frames across the loops, checks distinct motion, bounds, subpixel AA, palette roles and idempotent palette updates, then exercises autoplay without flash writes, selection, mode
 cycling, persistence and return after a paid-order alert. All 20 entries were also
 rendered and captured from the actual TC002 framebuffer; no failed frames were
 reported during that run.
+
+
+After building the host binary with `build.py --host`, run `node test-native-compo.cjs`.
+It compares 60 frames across all 20 entries between the C rasterizer and the browser's
+reference implementation. The expected difference is zero RGB channel values.
+`raster.h` is compiled into `storyd`; only the usual four runtime files are uploaded.
+The restored-state JSON buffer is explicitly terminated before QuickJS parsing.
+
+Hardware verification after deployment: the six heavier entries (voxel, floor,
+liquid, cube, silk, windows) measured 59.97–60.04 accepted fps with zero frame
+failures; their render-plus-handoff averages were 8.1–11.4 ms. Native and browser
+renderers matched all 60 reference frames exactly. A frozen Pacific Drive frame
+changed 680 RGB bytes between the real p-bloom and Osaka Jade palettes, with all
+11 palette roles read back from the device. Settings and the real paid counter
+were restored after checking. FPS telemetry measures generated/accepted frames;
+`presented` counts driver transfers and its sampled status is unsuitable for very
+short per-scene FPS measurements.

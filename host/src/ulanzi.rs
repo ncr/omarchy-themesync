@@ -346,6 +346,28 @@ fn colours(source: &SourcePalette) -> Result<(Rgb, Rgb, Rgb)> {
 fn bare(c: Rgb) -> String {
     c.to_hex().trim_start_matches('#').to_string()
 }
+fn story_palette(source: &SourcePalette) -> Result<Value> {
+    let (a, b, _) = colours(source)?;
+    let mut colors = serde_json::Map::new();
+    for role in [
+        "foreground",
+        "background",
+        "selection",
+        "red",
+        "green",
+        "blue",
+        "yellow",
+        "orange",
+        "cyan",
+        "magenta",
+        "brown",
+    ] {
+        if let Some(value) = source.get(role) {
+            colors.insert(role.into(), json!(bare(value)));
+        }
+    }
+    Ok(json!({"name":source.name,"accent":bare(a),"secondary":bare(b),"colors":colors}))
+}
 fn clock_patch(source: &SourcePalette) -> Result<Value> {
     let (a, b, _) = colours(source)?;
     Ok(
@@ -426,13 +448,7 @@ async fn sync(config: &Config, source: &SourcePalette, assets: bool) -> Result<V
     }
     if config.stories {
         let scene = device
-            .stories(
-                Method::PUT,
-                "/palette",
-                Some(json!({
-                    "name": source.name, "accent": bare(a), "secondary": bare(b)
-                })),
-            )
+            .stories(Method::PUT, "/palette", Some(story_palette(source)?))
             .await?;
         if scene["palette_rendering"] != "contrast-accents-v1" {
             bail!("Ulanzi scene engine does not render desktop palettes; update device.js");
@@ -697,12 +713,20 @@ pub async fn run(command: Command) -> Result<()> {
         }
         Command::Demo { name, manual, list } => {
             let config = load()?;
-            if !config.stories { bail!("native story engine is not configured"); }
+            if !config.stories {
+                bail!("native story engine is not configured");
+            }
             let device = Device::open(&config)?;
             let report = if list {
                 device.stories(Method::GET, "/demos", None).await?
             } else {
-                device.stories(Method::POST, "/demo", Some(json!({"id":name,"autoplay":!manual}))).await?
+                device
+                    .stories(
+                        Method::POST,
+                        "/demo",
+                        Some(json!({"id":name,"autoplay":!manual})),
+                    )
+                    .await?
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -747,6 +771,19 @@ mod tests {
         assert_eq!(patch["clock_colour2"], "040506");
         assert!(patch.get("brightness").is_none());
         assert!(patch.get("clock_font").is_none());
+    }
+    #[test]
+    fn story_colours_preserve_full_theme_values() {
+        let mut s = SourcePalette::default();
+        s.colors.insert("accent".into(), Rgb::new(1, 2, 3));
+        s.colors.insert("magenta".into(), Rgb::new(4, 5, 6));
+        s.colors.insert("green".into(), Rgb::new(7, 8, 9));
+        s.colors.insert("foreground".into(), Rgb::new(10, 11, 12));
+        let palette = story_palette(&s).unwrap();
+        assert_eq!(palette["colors"]["green"], "070809");
+        assert_eq!(palette["colors"]["foreground"], "0a0b0c");
+        assert_eq!(palette["accent"], "010203");
+        assert!(palette.get("brightness").is_none());
     }
     #[test]
     fn atlas_is_exactly_eight_scenes_and_five_tiny_sprites() {

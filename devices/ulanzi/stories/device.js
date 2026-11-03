@@ -32,7 +32,7 @@ let compo={enabled:!!(saved.compo&&saved.compo.enabled&&demos),id:saved.compo&&d
 let compoSession=!!saved.compoSession||compo.enabled, compoLast=nativeTime();
 function selectDemo(id,autoplay,remember=true){
  if(!demoIDs.includes(id))throw Error('unknown demo');
- compo={enabled:true,id,autoplay:!!autoplay,elapsed:0};compoSession=true;clock=false;clockApplied=false;compoLast=nativeTime();if(remember)persist();
+ compo={enabled:true,id,autoplay:!!autoplay,elapsed:0,paused:false};compoSession=true;clock=false;clockApplied=false;compoLast=nativeTime();if(remember)persist();
 }
 const digits=['111101101101111','010110010010111','111001111100111','111001111001111','101101111001001','111100111001111','111100111101111','111001010010010','111101111101111','111101111001111'];
 function persist(){if(!nativeSave(JSON.stringify({version:1,scene:selected,clock,brightness,day,count,revision,last_sync:lastSync,theme,compo:{enabled:compo.enabled,id:compo.id,autoplay:compo.autoplay},compoSession})))throw Error('state persistence failed');}
@@ -71,7 +71,11 @@ g.storyRequest=function(method,path,body){
   if(!demos)throw Error('compo module not installed');
   if(body.enabled===false){compo.enabled=false;compoSession=false;clock=false;persist();return status();}
   if(body.autoplay!==undefined&&typeof body.autoplay!=='boolean')throw Error('autoplay must be boolean');
-  selectDemo(body.id||compo.id,body.autoplay!==false);return status();
+  if(body.time!==undefined&&(!Number.isFinite(body.time)||body.time<0||body.time>3600))throw Error('invalid demo time');
+  if(body.paused!==undefined&&typeof body.paused!=='boolean')throw Error('invalid pause state');
+  selectDemo(body.id||compo.id,body.autoplay!==false);
+  if(body.time!==undefined)compo.elapsed=1.15+body.time;
+  compo.paused=body.paused===true;return status();
  }
  if(method==='PUT'&&path==='/state'){
   if(body.day!==today()||!Number.isSafeInteger(body.count)||body.count<0||body.count>100000||!Number.isSafeInteger(body.revision)||body.revision<1)throw Error('invalid daily state');
@@ -95,7 +99,15 @@ g.storyRequest=function(method,path,body){
  if(method==='POST'&&path==='/replay'){replay();return status();}
  if(method==='PUT'&&path==='/palette'){
   if(!/^[0-9a-fA-F]{6}$/.test(body.accent)||!/^[0-9a-fA-F]{6}$/.test(body.secondary)||typeof body.name!=='string'||body.name.length>100)throw Error('invalid palette');
-  if(theme.name!==body.name||theme.accent!==body.accent||theme.secondary!==body.secondary){theme={name:body.name,accent:body.accent,secondary:body.secondary};maps=Object.fromEntries(ids.map(id=>[id,paletteMap(id)]));persist();}return status();
+  const roles=['foreground','background','selection','red','green','blue','yellow','orange','cyan','magenta','brown'];
+  const next={name:body.name,accent:body.accent,secondary:body.secondary};
+  if(body.colors!==undefined){
+   if(!body.colors||typeof body.colors!=='object'||Array.isArray(body.colors))throw Error('invalid theme colours');
+   if(Object.keys(body.colors).some(k=>!roles.includes(k)))throw Error('unknown theme colour');
+   next.colors={};for(const key of roles)if(body.colors[key]!==undefined){if(!/^[0-9a-fA-F]{6}$/.test(body.colors[key]))throw Error('invalid theme colour');next.colors[key]=body.colors[key];}
+  }
+  const key=value=>[value.name,value.accent,value.secondary,...roles.map(k=>(value.colors||{})[k]||'')].join('/');
+  if(key(theme)!==key(next)){theme=next;maps=Object.fromEntries(ids.map(id=>[id,paletteMap(id)]));persist();}return status();
  }
  throw Error('unknown request');
 };
@@ -107,7 +119,7 @@ g.storyTick=function(){
  if(clock&&!active){if(!clockApplied){api('PUT','/scene',{base:'clock'});clockApplied=true;}return null;}
  clockApplied=false;
  if(compo.enabled&&!active){
-  compo.elapsed+=delta;const meta=demos.catalogue.find(s=>s.id===compo.id);
+  if(!compo.paused)compo.elapsed+=delta;const meta=demos.catalogue.find(s=>s.id===compo.id);
   if(compo.autoplay&&compo.elapsed>=meta.duration+1.15){selectDemo(demoIDs[(demoIDs.indexOf(compo.id)+1)%demoIDs.length],true,false);}
   const elapsed=compo.autoplay||compo.elapsed<1.15?compo.elapsed:1.15+(compo.elapsed-1.15)%meta.duration;
   return demos.rgb(demos.frame(compo.id,elapsed,theme,{title:true}));
