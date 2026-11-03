@@ -361,6 +361,11 @@ Panel {
             alarming: !!root.info && root.info.hook_installed !== true
           }
           StatRow {
+            label: "Ulanzi Wi-Fi"
+            value: root.info && root.info.ulanzi ? (root.info.ulanzi.connected ? String(root.info.ulanzi.theme || "") + " · " + String(root.info.ulanzi.season || "garden") : "reconnecting") : "not configured"
+            alarming: !!root.info && !!root.info.ulanzi && root.info.ulanzi.connected !== true
+          }
+          StatRow {
             label: "Protocol"
             value: root.info ? String(root.info.protocol) : ""
           }

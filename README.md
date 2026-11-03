@@ -31,7 +31,7 @@ directory.
 
 ## Install
 
-From source (Rust stable ≥ 1.85):
+From source (Rust stable ≥ 1.88):
 
 ```bash
 git clone https://github.com/ncr/omarchy-themesync && cd omarchy-themesync
@@ -65,6 +65,64 @@ editor, with "hide while the daemon is not running").
 
 Move it with `omarchy bar move io.github.ncr.themesync`, take it out with
 `omarchy plugin disable io.github.ncr.themesync`; `themesync uninstall` removes it.
+
+## Ulanzi TC002 over Wi-Fi
+
+The TC002 is a second receiver, independent of the watch's BLE connection. ThemeSync
+checks the palette once a second and reconciles the display every 30 seconds. Its
+clock colours follow the desktop accent and secondary colour; its font and brightness
+stay under the user's control. Wi-Fi failures back off without blocking Bluetooth.
+
+```bash
+themesync ulanzi add 192.168.1.50 --token-file /absolute/path/to/tokens
+themesync ulanzi sync
+themesync ulanzi status
+```
+
+The private token file has `control=` and `admin=` lines. Tokens and local order state
+never belong in Git. The display needs the patched
+[TC002 runtime](https://github.com/atomicstack/tc002-customisation); the complete patch,
+including sprite forwarding, the Berry stack fix and continuous frame transport, is in
+[devices/ulanzi/stories/runtime.patch](devices/ulanzi/stories/runtime.patch), based on
+upstream commit `ed902b8c949c`. Follow the upstream runtime build/setup instructions
+and apply the patch before building.
+
+### Daily paid-order scenes
+
+Set `"stories": true` in `~/.config/themesync/ulanzi.json` after installing the local
+scene engine. Six worlds run directly on the native 52×16 panel: a city, railway,
+space, vinyl club, crane workshop and garden. Calm animation keeps them alive; a paid
+order triggers a complete scene-specific story. Scenes retain their contrasting art
+palette while the native clock follows the desktop theme.
+
+```bash
+themesync ulanzi scene rail
+themesync ulanzi scene garden
+themesync ulanzi clock
+themesync ulanzi replay  # no change to the real paid count
+```
+
+The physical `-` and `+` buttons select scenes; `Ulanzi` toggles the clock. The encoder
+adjusts brightness, its click replays an animation, and its hold opens the native menu.
+
+The read-only BaseLinker bridge counts first fully-paid transitions in the current
+Europe/Warsaw day, deduplicates orders, resets at midnight and queues new animations.
+The initial count is applied quietly. Its separate `themesync-paid-orders.service`
+keeps API retries and device recovery independent of the BLE daemon.
+
+See the [scene engine and BaseLinker guide](devices/ulanzi/stories/README.md) for build,
+configuration, payment-history coverage and tests. The animations run without the
+host while the clock remains powered; fetching new orders and recovering the RAM
+runtime after a power cycle require the host. No firmware partition is flashed.
+
+The earlier Berry **Quiet Garden** remains available when stories mode is disabled:
+`themesync ulanzi garden`, `themesync ulanzi clock`, and the idempotent
+`themesync ulanzi garden --bloom EVENT_ID`. Its pixel templates, RGB atlases and
+reference artwork are in `devices/ulanzi/`. This legacy mode does not query BaseLinker.
+
+Use `themesync ulanzi sync --file path/to/colors.toml` to preview a palette without
+changing the desktop; the daemon restores the active palette on reconciliation.
+For a Wi-Fi-only receiver, run `themesync ulanzi watch` directly.
 
 ## Pair
 

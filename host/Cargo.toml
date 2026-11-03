@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 # Not tested locally below the current stable (no rustup here); the CI `msrv` job builds with
 # exactly this version and is the check.
-rust-version = "1.85"
+rust-version = "1.88"
 description = "The Omarchy desktop theme on your smartwatch over BLE, both ways: a signed advertising beacon plus a request scanner, and the CLI around it"
 license = "MIT"
 repository = "https://github.com/ncr/omarchy-themesync"
@@ -30,6 +30,7 @@ uuid = "1"
 hmac = "0.13.0"
 sha2 = "0.11.0"
 subtle = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

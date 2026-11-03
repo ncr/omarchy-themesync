@@ -153,10 +153,12 @@ pub fn encode_state(key: &[u8], theme: &[u8], echo: u16, time: Option<&[u8; 7]>)
     v
 }
 
+pub type DecodedState<'a> = (&'a [u8], u16, Option<[u8; 7]>);
+
 /// The receiver's view of a state beacon: the theme bytes (what the apply rule hashes),
 /// the echo, and the time record when present — if the packet is ours and the mac verifies.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn decode_state<'a>(key: &[u8], b: &'a [u8]) -> Result<(&'a [u8], u16, Option<[u8; 7]>), RequestError> {
+pub fn decode_state<'a>(key: &[u8], b: &'a [u8]) -> Result<DecodedState<'a>, RequestError> {
     if b.len() < 2 || b[0] != MAGIC || b[1] != KIND_STATE {
         return Err(RequestError::NotARequest);
     }
@@ -649,14 +651,14 @@ mod tests {
             encode_state(&key, &theme, 1, None),
             encode_state(&key, &theme, 1, Some(&[26, 8, 31, 13, 5, 9, 1])),
             theme.clone(),
-            crate::themelist::encode_list(&[theme.clone()]).unwrap(),
+            crate::themelist::encode_list(std::slice::from_ref(&theme)).unwrap(),
             crate::themelist::ListStatus { version: crate::themelist::STATUS_VERSION, count: 1, crc: 1, on_sd: false, loaded: true, nonce: 5 }.encode().to_vec(),
         ];
         for v in &valid {
             for n in 0..=v.len() {
                 corpus.push(v[..n].to_vec());
                 let mut ext = v.clone();
-                ext.extend(std::iter::repeat(0x42).take(n));
+                ext.extend(std::iter::repeat_n(0x42, n));
                 corpus.push(ext);
             }
             for i in 0..v.len() {
@@ -780,7 +782,7 @@ mod tests {
 
     #[test]
     fn atomic_write_creates_0600_and_replaces() {
-        let dir = std::env::temp_dir().join(format!("themesync-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("themesync-beacon-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("sub").join("ctr");
         write_atomic(&path, "1\n").unwrap();

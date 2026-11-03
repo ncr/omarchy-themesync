@@ -27,6 +27,7 @@ mod protocol;
 mod setup;
 mod themelist;
 mod transport;
+mod ulanzi;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -83,6 +84,11 @@ impl BleArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Wi-Fi pixel displays: theme sync and the growing garden, independent of Bluetooth.
+    Ulanzi {
+        #[command(subcommand)]
+        command: ulanzi::Command,
+    },
     /// Print the resolved watch palette for the active theme.
     Theme {
         #[command(flatten)]
@@ -346,6 +352,7 @@ async fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Ulanzi { command } => ulanzi::run(command).await?,
         Cmd::Theme { src, json, source, contrast } => {
             if source {
                 let s = omarchy::load(src.file.as_deref())?;
@@ -619,6 +626,9 @@ async fn main() -> Result<()> {
                         println!("watch:    {}{}", i.watch.as_deref().unwrap_or("unknown"), i.last_request.as_ref().map(|r| format!(", last request {r}")).unwrap_or_default());
                         println!("counter:  last accepted #{}{}{}", i.ctr_last, if i.ctr_locked { " — LOCKED (counter file unreadable): themesync reset-counter" } else { "" }, if i.stale_rejected > 0 { format!(", {} stale request(s) rejected", i.stale_rejected) } else { String::new() });
                         println!("list:     {}", i.list_push);
+                        if let Some(display) = &i.ulanzi {
+                            println!("Ulanzi:   {} · {} · {}", if display["connected"] == true { "connected" } else { "retrying" }, display["theme"].as_str().unwrap_or("unknown theme"), display["season"].as_str().unwrap_or("garden"));
+                        }
                         if !i.hook_installed {
                             println!("hook:     NOT installed — desktop-side theme changes will not reach the watch (themesync install)");
                         }

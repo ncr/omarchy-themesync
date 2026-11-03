@@ -434,6 +434,8 @@ impl BadPacketLog {
 }
 
 pub async fn run(opts: Options) -> Result<()> {
+    // A Wi-Fi display keeps working while BlueZ is off or reconnecting.
+    tokio::spawn(crate::ulanzi::watch());
     let mut radio = open_radio_waiting("beacon").await?;
     log(&format!("adapter {}", radio.adapter_name()));
     let mut key: Option<Key> = beacon::load_key();
@@ -651,6 +653,7 @@ pub async fn run(opts: Options) -> Result<()> {
                             last_request: last_request.clone(),
                             list_push: list_state.lock().unwrap().clone(),
                             hook_installed: om.as_ref().map(|o| o.hooks_dir().join("themesync").is_file()).unwrap_or(false),
+                            ulanzi: crate::ulanzi::cached_status(),
                         };
                         Reply {
                             theme: Some(theme_name.clone()),

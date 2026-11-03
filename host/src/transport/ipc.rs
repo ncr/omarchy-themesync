@@ -78,6 +78,8 @@ pub struct StatusInfo {
     pub last_request: Option<String>,
     pub list_push: String,
     pub hook_installed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ulanzi: Option<serde_json::Value>,
 }
 
 impl Reply {

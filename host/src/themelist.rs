@@ -309,7 +309,7 @@ mod tests {
     use crate::palette::{Mode, Rgb, Role, WatchPalette};
 
     fn theme(slug: &str, seed: u8) -> Vec<u8> {
-        let mut p = WatchPalette { mode: if seed % 2 == 0 { Mode::Dark } else { Mode::Light }, name: slug.into(), colors: [Rgb::default(); Role::COUNT] };
+        let mut p = WatchPalette { mode: if seed.is_multiple_of(2) { Mode::Dark } else { Mode::Light }, name: slug.into(), colors: [Rgb::default(); Role::COUNT] };
         for (i, r) in Role::ALL.iter().enumerate() {
             p.set(*r, Rgb::new(seed.wrapping_mul(3).wrapping_add(i as u8), i as u8, seed));
         }
@@ -398,7 +398,7 @@ mod tests {
     fn list_test_vector() {
         let key: Vec<u8> = (0u8..16).collect();
         let entry = vec![0x02, 0x01, 0x10, 0x20, 0x30, 0x02, 0x40, 0x50, 0x60, 0x40, 0x04, b'n', b'o', b'r', b'd', 0x41, 0x01, 0x00];
-        let list = encode_list(&[entry.clone()]).unwrap();
+        let list = encode_list(std::slice::from_ref(&entry)).unwrap();
         let mut expected = vec![0x01, 0x01, 0x12];
         expected.extend_from_slice(&entry);
         assert_eq!(list, expected);

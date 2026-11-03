@@ -151,7 +151,7 @@ pub fn decode_theme(bytes: &[u8]) -> Result<DecodedTheme, DecodeError> {
         return Err(DecodeError::Truncated);
     }
     let colors = bytes[HEADER_LEN..colors_end]
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .map(|c| Rgb::new(c[0], c[1], c[2]))
         .collect();
 
@@ -369,7 +369,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
 
 pub fn from_hex(s: &str) -> Option<Vec<u8>> {
     let clean: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         return None;
     }
     (0..clean.len()).step_by(2).map(|i| u8::from_str_radix(&clean[i..i + 2], 16).ok()).collect()

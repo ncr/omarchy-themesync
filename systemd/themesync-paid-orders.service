@@ -1,0 +1,15 @@
+[Unit]
+Description=ThemeSync Ulanzi daily paid BaseLinker orders
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/dev/omarchy-themesync/devices/ulanzi/stories/paid_orders.py --config %h/.config/themesync/paid-orders.json
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
