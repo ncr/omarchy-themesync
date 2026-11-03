@@ -92,8 +92,9 @@ and apply the patch before building.
 Set `"stories": true` in `~/.config/themesync/ulanzi.json` after installing the local
 scene engine. Six worlds run directly on the native 52×16 panel: a city, railway,
 space, vinyl club, crane workshop and garden. Calm animation keeps them alive; a paid
-order triggers a complete scene-specific story. Scenes retain their contrasting art
-palette while the native clock follows the desktop theme.
+order triggers a complete scene-specific story. Structural accents and the counter follow the desktop theme, with saturated LED
+colours and an unlit background. Semantic colours such as warm windows and foliage
+remain readable; the native clock also follows the desktop theme.
 
 ```bash
 themesync ulanzi scene rail

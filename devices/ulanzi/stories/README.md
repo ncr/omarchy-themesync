@@ -3,6 +3,12 @@
 Six scenes run **on the TC002 itself**, at native 52×16 RGB888, about 8 fps:
 `city`, `rail`, `orbit`, `vinyl`, `maker`, `garden`. `renderer.js` is the same v5 source as the approved browser preview. QuickJS executes it locally; the host never streams animation frames over Wi-Fi.
 
+The desktop accent recolours structural elements and the counter in every scene.
+The secondary colour accents machinery and decorative elements. Saturated, quantized
+channels keep the black background unlit and avoid low-channel LED haze; garden
+foliage, rain and flower colours retain their meaning. Palette changes preserve the
+count, selected scene and brightness, and persist across engine restarts.
+
 Controls:
 
 - **− / +**: previous / next scene. Choice persists on the clock.
@@ -49,6 +55,7 @@ Build: `python3 build.py --quickjs /path/to/quickjs-2026-06-04 --zig /path/to/zi
 
 Verified:
 
+- `node test-scene-palettes.cjs`: visible pixel changes in all six scenes for counts 0/12/20, preserved silhouettes and black background, persistence, no low-channel haze or repeated flash writes.
 - `node test-device.cjs`: all scenes, controls, baseline without replay, queued burst, dedup, restart, clock return, midnight, counts >20.
 - `python3 test-paid-orders.py`: exact decimal totals, full/partial transitions, delayed history retry, cached/restarted dedup, first full-payment date, 23/25-hour DST days, no PII retention.
 - 126 static scene states and 4600 object transport states in the shared v5 scene verifier.

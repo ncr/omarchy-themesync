@@ -426,9 +426,12 @@ async fn sync(config: &Config, source: &SourcePalette, assets: bool) -> Result<V
                 })),
             )
             .await?;
+        if scene["palette_rendering"] != "contrast-accents-v1" {
+            bail!("Ulanzi scene engine does not render desktop palettes; update device.js");
+        }
         return Ok(
             json!({"connected":true,"host":config.host,"theme":source.name,
-            "synced_at":now(),"mode":"stories","scene":scene["scene"],"paid_today":scene["count"],
+            "palette_rendering":scene["palette_rendering"],"synced_at":now(),"mode":"stories","scene":scene["scene"],"paid_today":scene["count"],
             "day":scene["day"],"build":status["build"],"frames":status["presented"],"boot_id":status["boot_id"]}),
         );
     }
@@ -541,7 +544,7 @@ pub async fn watch() {
                 match result {
                     Ok(key) => {
                         if changed {
-                            eprintln!("[themesync] Ulanzi: palette and garden synchronized");
+                            eprintln!("[themesync] Ulanzi: display palette synchronized");
                         }
                         applied = key;
                         retry = 1;

@@ -6,6 +6,27 @@ let saved=nativeLoad()||{}, day=today(), count=0, revision=0, selected=ids.inclu
 let clock=!!saved.clock, brightness=Number.isInteger(saved.brightness)?saved.brightness:35;
 if(saved.day===day){count=Number.isInteger(saved.count)?Math.max(0,saved.count):0;revision=saved.revision||0;}
 let lastSync=saved.last_sync||0, queue=[],active=null, visible=count, returnClock=false, clockApplied=false, theme=saved.theme||{};
+// Map structural accents to the desktop hue without lighting the black background.
+// Saturation and discrete channel levels avoid the panel driver's low-channel haze.
+function ledColour(hex,level){
+ let rgb=[0,2,4].map(i=>parseInt(hex.slice(i,i+2),16)),hi=Math.max(...rgb),lo=Math.min(...rgb);
+ if(hi<16){rgb=[0,192,255];hi=255;lo=0;}
+ if(hi-lo>8){rgb=rgb.map(v=>(v-lo)*hi/(hi-lo));}
+ const channels=rgb.map(v=>{const n=Math.min(255,Math.round(v/hi*level/32)*32);return n<64?0:n;});
+ return (channels[0]<<16)|(channels[1]<<8)|channels[2];
+}
+function paletteMap(id){
+ if(!theme.accent)return null;
+ const map=new Map([[art.C.brown,ledColour(theme.accent,96)],[art.C.teal,ledColour(theme.accent,192)]]);
+ if(id!=='garden'){
+  map.set(art.C.blue,ledColour(theme.accent,128));
+  map.set(art.C.cyan,ledColour(theme.accent,255));
+  map.set(art.C.violet,ledColour(theme.secondary,255));
+ }
+ return map;
+}
+let maps=Object.fromEntries(ids.map(id=>[id,paletteMap(id)]));
+function applyPalette(data,id){const map=maps[id];if(map)for(let i=0;i<data.length;i++){const colour=map.get(data[i]);if(colour!==undefined)data[i]=colour;}}
 const digits=['111101101101111','010110010010111','111001111100111','111001111001111','101101111001001','111100111001111','111100111101111','111001010010010','111101111101111','111101111001111'];
 function persist(){if(!nativeSave(JSON.stringify({version:1,scene:selected,clock,brightness,day,count,revision,last_sync:lastSync,theme})))throw Error('state persistence failed');}
 function api(method,path,value){return nativeApi(method,path,JSON.stringify(value));}
@@ -26,7 +47,7 @@ g.storyControl=function(control,event){
  else if(control==='middle')setClock(!clock);
  else if(control==='knob')replay();
 };
-function status(){return {version:1,engine:'local-quickjs',resolution:[52,16],scene:selected,scenes:ids,day,count,visual_capacity:20,visible_count:visible,revision,clock,brightness,last_sync:lastSync,queue:queue.length,animation:active?{ordinal:active.n,demo:active.demo,seconds:Math.max(0,nativeTime()-active.start),duration:active.duration}:null,theme,...nativeInfo()};}
+function status(){return {version:1,engine:'local-quickjs',palette_rendering:'contrast-accents-v1',resolution:[52,16],scene:selected,scenes:ids,day,count,visual_capacity:20,visible_count:visible,revision,clock,brightness,last_sync:lastSync,queue:queue.length,animation:active?{ordinal:active.n,demo:active.demo,seconds:Math.max(0,nativeTime()-active.start),duration:active.duration}:null,theme,...nativeInfo()};}
 g.storyRequest=function(method,path,body){
  resetDay();
  if(method==='GET'&&path==='/status')return status();
@@ -52,7 +73,7 @@ g.storyRequest=function(method,path,body){
  if(method==='POST'&&path==='/replay'){replay();return status();}
  if(method==='PUT'&&path==='/palette'){
   if(!/^[0-9a-fA-F]{6}$/.test(body.accent)||!/^[0-9a-fA-F]{6}$/.test(body.secondary)||typeof body.name!=='string'||body.name.length>100)throw Error('invalid palette');
-  if(theme.name!==body.name||theme.accent!==body.accent||theme.secondary!==body.secondary){theme={name:body.name,accent:body.accent,secondary:body.secondary};persist();}return status();
+  if(theme.name!==body.name||theme.accent!==body.accent||theme.secondary!==body.secondary){theme={name:body.name,accent:body.accent,secondary:body.secondary};maps=Object.fromEntries(ids.map(id=>[id,paletteMap(id)]));persist();}return status();
  }
  throw Error('unknown request');
 };
@@ -66,6 +87,7 @@ g.storyTick=function(){
  const overflow=n>20;let data=art.frame(selected,Math.min(20,n),nativeTime(),overflow?null:e,{counter:false});
  // A completed 20-object world stays intact beyond 20; later payments still celebrate.
  if(overflow&&active){const s=nativeTime()-active.start;if(s<5)for(let i=0;i<8;i++){let x=(i*7+Math.floor(s*3))%52,y=Math.floor(s*2+i*3)%16;data[y*52+x]=[art.C.gold,art.C.cyan,art.C.pink][i%3];}}
- number(data,count,art.C.amber);return art.rgb(data);
+ applyPalette(data,selected);
+ number(data,count,theme.accent?ledColour(theme.accent,255):art.C.amber);return art.rgb(data);
 };
 })(globalThis);

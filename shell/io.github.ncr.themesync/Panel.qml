@@ -300,13 +300,36 @@ Panel {
 
           PanelSectionHeader {
             width: parent.width
+            visible: !!root.info && !!root.info.ulanzi
+            text: "ULANZI · Wi-Fi"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+          StatRow {
+            visible: !!root.info && !!root.info.ulanzi
+            label: "Display"
+            value: root.info && root.info.ulanzi ? (root.info.ulanzi.connected ? "connected over Wi-Fi" : "reconnecting") : ""
+            alarming: !!root.info && !!root.info.ulanzi && root.info.ulanzi.connected !== true
+          }
+          StatRow {
+            visible: !!root.info && !!root.info.ulanzi
+            label: "Display theme"
+            value: root.info && root.info.ulanzi ? String(root.info.ulanzi.theme || "") : ""
+          }
+          StatRow {
+            visible: !!root.info && !!root.info.ulanzi
+            label: "Scene · paid today"
+            value: root.info && root.info.ulanzi ? String(root.info.ulanzi.scene || root.info.ulanzi.season || "garden") + (root.info.ulanzi.paid_today !== undefined ? " · " + root.info.ulanzi.paid_today : "") : ""
+          }
+          PanelSectionHeader {
+            width: parent.width
             text: "WATCH"
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
 
           StatRow {
-            label: "Pairing"
+            label: "Saved pairing"
             value: root.info ? String(root.info.pairing) : ""
           }
           StatRow {
@@ -359,11 +382,6 @@ Panel {
             label: "Theme hook"
             value: root.info ? (root.info.hook_installed === true ? "installed" : "missing — themesync install") : ""
             alarming: !!root.info && root.info.hook_installed !== true
-          }
-          StatRow {
-            label: "Ulanzi Wi-Fi"
-            value: root.info && root.info.ulanzi ? (root.info.ulanzi.connected ? String(root.info.ulanzi.theme || "") + " · " + String(root.info.ulanzi.season || "garden") : "reconnecting") : "not configured"
-            alarming: !!root.info && !!root.info.ulanzi && root.info.ulanzi.connected !== true
           }
           StatRow {
             label: "Protocol"
