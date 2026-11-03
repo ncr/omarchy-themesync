@@ -79,7 +79,11 @@ int main(int argc,char**argv){
  dry_run=argc>6&&!strcmp(argv[6],"--dry-run");int port=argc>5?atoi(argv[5]):8878;if(port<1024||port>65535)return 2;
  JSRuntime *rt=JS_NewRuntime();JS_SetMemoryLimit(rt,3*1024*1024);JS_SetMaxStackSize(rt,512*1024);ctx=JS_NewContext(rt);if(!ctx)return 1;
  JSValue g=JS_GetGlobalObject(ctx);JS_SetPropertyStr(ctx,g,"nativeTime",JS_NewCFunction(ctx,js_time,"nativeTime",0));JS_SetPropertyStr(ctx,g,"nativeDay",JS_NewCFunction(ctx,js_day,"nativeDay",0));JS_SetPropertyStr(ctx,g,"nativeSave",JS_NewCFunction(ctx,js_save,"nativeSave",1));JS_SetPropertyStr(ctx,g,"nativeLoad",JS_NewCFunction(ctx,js_load,"nativeLoad",0));JS_SetPropertyStr(ctx,g,"nativeApi",JS_NewCFunction(ctx,js_api,"nativeApi",3));JS_SetPropertyStr(ctx,g,"nativeInfo",JS_NewCFunction(ctx,js_info,"nativeInfo",0));JS_FreeValue(ctx,g);
- if(!evalfile(argv[1])||!evalfile(argv[2]))return 1;
+ if(!evalfile(argv[1]))return 1;
+ char demos_path[1024];snprintf(demos_path,sizeof(demos_path),"%s",argv[1]);char *slash=strrchr(demos_path,'/');
+ if(slash)snprintf(slash+1,sizeof(demos_path)-(slash+1-demos_path),"demos.js");else snprintf(demos_path,sizeof(demos_path),"demos.js");
+ if(access(demos_path,R_OK)==0&&!evalfile(demos_path))return 1;
+ if(!evalfile(argv[2]))return 1;
  int listener=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0),yes=1;setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=INADDR_ANY};if(bind(listener,(void*)&a,sizeof(a))||listen(listener,4)){perror("story HTTP");return 1;}fcntl(listener,F_SETFL,O_NONBLOCK);
  int keys=open("/dev/input/event67",O_RDONLY|O_NONBLOCK|O_CLOEXEC),knob=open("/dev/input/event68",O_RDONLY|O_NONBLOCK|O_CLOEXEC);fprintf(stderr,"storyd ready; local 52x16 scenes, port %d; keys=%d knob=%d\n",port,keys>=0,knob>=0);
  double next=mono();while(running){

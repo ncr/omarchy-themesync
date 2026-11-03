@@ -12,11 +12,18 @@ def main():
   return r.stdout
  def adb(*args):return run([str(package/'bin/adb'),'-P','5039','-s',host+':5555',*args])
  def shell(command):return adb('shell',command)
- run(['/usr/bin/python3',str(package/'runtime-control.py'),'start','--host',host],timeout=180)
+ # A healthy runtime needs no bootstrap upload (important for the old ADB sync server).
+ healthy=False
+ try:
+  token=next(line[8:] for line in (package/'tokens').read_text().splitlines() if line.startswith('control='))
+  request=urllib.request.Request('http://'+host+'/api/v1/status',headers={'Authorization':'Bearer '+token})
+  with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request,timeout=3) as response:healthy=json.load(response).get('renderer')=='running'
+ except (OSError,ValueError,StopIteration):pass
+ if not healthy:run(['/usr/bin/python3',str(package/'runtime-control.py'),'start','--host',host],timeout=180)
  shell('/tmp/busybox mkdir -p /tmp/tc002/stories /data/tc002/stories; /tmp/busybox chmod 700 /data/tc002/stories')
  # Upload from the installed host bundle, so a recovered device gets the tested build.
- for name in ('storyd','renderer.js','device.js'):adb('push',str(stories/name),'/tmp/tc002/stories/'+name)
- shell('/tmp/busybox cp /tmp/tc002/stories/storyd /tmp/tc002/stories/renderer.js /tmp/tc002/stories/device.js /data/tc002/stories/')
+ for name in ('storyd','renderer.js','demos.js','device.js'):adb('push',str(stories/name),'/tmp/tc002/stories/'+name)
+ shell('/tmp/busybox cp /tmp/tc002/stories/storyd /tmp/tc002/stories/renderer.js /tmp/tc002/stories/demos.js /tmp/tc002/stories/device.js /data/tc002/stories/')
  shell('if [ -f /tmp/tc002/stories.pid ]; then kill -TERM $(cat /tmp/tc002/stories.pid) 2>/dev/null; /tmp/busybox sleep 1; fi; /tmp/busybox chmod 700 /tmp/tc002/stories/storyd; trap "" HUP; /tmp/tc002/stories/storyd /tmp/tc002/stories/renderer.js /tmp/tc002/stories/device.js /data/tc002/state/credentials/tokens /data/tc002/stories/state.json </dev/null >/tmp/tc002/stories.log 2>&1 & echo $! >/tmp/tc002/stories.pid')
  print('Ulanzi RAM scene engine restored.',flush=True)
 if __name__=='__main__':main()

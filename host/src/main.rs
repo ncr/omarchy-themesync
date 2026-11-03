@@ -84,7 +84,7 @@ impl BleArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Wi-Fi pixel displays: theme sync and the growing garden, independent of Bluetooth.
+    /// Wi-Fi pixel displays: theme sync, paid-order worlds and demo compo, independent of Bluetooth.
     Ulanzi {
         #[command(subcommand)]
         command: ulanzi::Command,

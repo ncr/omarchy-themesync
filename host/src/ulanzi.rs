@@ -47,6 +47,14 @@ pub enum Command {
     },
     /// Replay the current scene animation without changing the real paid count.
     Replay,
+    /// Play the 20 native pixel-art demos; --manual holds one animated entry.
+    Demo {
+        name: Option<String>,
+        #[arg(long)]
+        manual: bool,
+        #[arg(long)]
+        list: bool,
+    },
     /// Run just the Wi-Fi receiver (normally also started by themesync daemon).
     Watch,
 }
@@ -431,7 +439,7 @@ async fn sync(config: &Config, source: &SourcePalette, assets: bool) -> Result<V
         }
         return Ok(
             json!({"connected":true,"host":config.host,"theme":source.name,
-            "palette_rendering":scene["palette_rendering"],"synced_at":now(),"mode":"stories","scene":scene["scene"],"paid_today":scene["count"],
+            "palette_rendering":scene["palette_rendering"],"synced_at":now(),"mode":scene["mode"],"scene":if scene["mode"]=="compo" { &scene["compo"]["name"] } else { &scene["scene"] },"paid_today":scene["count"],
             "day":scene["day"],"build":status["build"],"frames":status["presented"],"boot_id":status["boot_id"]}),
         );
     }
@@ -686,6 +694,17 @@ pub async fn run(command: Command) -> Result<()> {
                 .stories(Method::POST, "/replay", Some(json!({})))
                 .await?;
             println!("Animation replayed; real daily count unchanged.");
+        }
+        Command::Demo { name, manual, list } => {
+            let config = load()?;
+            if !config.stories { bail!("native story engine is not configured"); }
+            let device = Device::open(&config)?;
+            let report = if list {
+                device.stories(Method::GET, "/demos", None).await?
+            } else {
+                device.stories(Method::POST, "/demo", Some(json!({"id":name,"autoplay":!manual}))).await?
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Watch => unreachable!(),
     }

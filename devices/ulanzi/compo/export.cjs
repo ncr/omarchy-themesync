@@ -1,0 +1,2 @@
+const fs=require('node:fs'),a=require('../stories/demos.js');const out=process.argv[2]||__dirname+'/previews';fs.mkdirSync(out,{recursive:true});const report=[];
+for(const s of a.catalogue){const frames=[];for(let i=0;i<s.duration*8;i++){let data=a.frame(s.id,i/8,{accent:'4cc9ff',secondary:'b97aff'});frames.push(Buffer.from(a.rgb(data)).toString('base64'));}fs.writeFileSync(out+'/'+s.id+'.json',JSON.stringify({meta:s,frames}));report.push(s);}fs.writeFileSync(out+'/catalogue.json',JSON.stringify(report,null,2));

@@ -8,3 +8,5 @@ devices/ulanzi/stories/storyd
 devices/ulanzi/stories/storyd-host
 devices/ulanzi/stories/zig-cache/
 __pycache__/
+
+devices/ulanzi/compo/previews/

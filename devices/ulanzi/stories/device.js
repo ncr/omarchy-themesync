@@ -27,11 +27,18 @@ function paletteMap(id){
 }
 let maps=Object.fromEntries(ids.map(id=>[id,paletteMap(id)]));
 function applyPalette(data,id){const map=maps[id];if(map)for(let i=0;i<data.length;i++){const colour=map.get(data[i]);if(colour!==undefined)data[i]=colour;}}
+const demos=g.UlanziDemos||null, demoIDs=demos?demos.catalogue.map(s=>s.id):[];
+let compo={enabled:!!(saved.compo&&saved.compo.enabled&&demos),id:saved.compo&&demoIDs.includes(saved.compo.id)?saved.compo.id:demoIDs[0],autoplay:saved.compo?saved.compo.autoplay!==false:true,elapsed:0};
+let compoSession=!!saved.compoSession||compo.enabled, compoLast=nativeTime();
+function selectDemo(id,autoplay,remember=true){
+ if(!demoIDs.includes(id))throw Error('unknown demo');
+ compo={enabled:true,id,autoplay:!!autoplay,elapsed:0};compoSession=true;clock=false;clockApplied=false;compoLast=nativeTime();if(remember)persist();
+}
 const digits=['111101101101111','010110010010111','111001111100111','111001111001111','101101111001001','111100111001111','111100111101111','111001010010010','111101111101111','111101111001111'];
-function persist(){if(!nativeSave(JSON.stringify({version:1,scene:selected,clock,brightness,day,count,revision,last_sync:lastSync,theme})))throw Error('state persistence failed');}
+function persist(){if(!nativeSave(JSON.stringify({version:1,scene:selected,clock,brightness,day,count,revision,last_sync:lastSync,theme,compo:{enabled:compo.enabled,id:compo.id,autoplay:compo.autoplay},compoSession})))throw Error('state persistence failed');}
 function api(method,path,value){return nativeApi(method,path,JSON.stringify(value));}
-function setScene(id){if(!ids.includes(id))throw Error('unknown scene');selected=id;clock=false;returnClock=false;clockApplied=false;if(active){active.start=nativeTime();active.duration=art.themes.find(x=>x.id===selected).duration;}persist();}
-function setClock(value){clock=value;returnClock=false;clockApplied=false;persist();if(clock&&!active){api('PUT','/scene',{base:'clock'});clockApplied=true;}}
+function setScene(id,keepCompo=false){if(!ids.includes(id))throw Error('unknown scene');selected=id;compo.enabled=false;if(!keepCompo)compoSession=false;clock=false;returnClock=false;clockApplied=false;if(active){active.start=nativeTime();active.duration=art.themes.find(x=>x.id===selected).duration;}persist();}
+function setClock(value){compo.enabled=false;compoSession=false;clock=value;returnClock=false;clockApplied=false;persist();if(clock&&!active){api('PUT','/scene',{base:'clock'});clockApplied=true;}}
 function resetDay(){if(today()===day)return;day=today();count=0;revision=0;visible=0;queue=[];active=null;returnClock=false;persist();}
 function finish(){if(!active)return;if(!active.demo)visible=active.n;active=null;if(!queue.length&&returnClock){returnClock=false;clock=true;clockApplied=false;}}
 function begin(){if(active||!queue.length)return;let event=queue.shift();active={...event,start:nativeTime(),duration:art.themes.find(x=>x.id===selected).duration};clockApplied=false;}
@@ -43,14 +50,29 @@ g.storyControl=function(control,event){
   api('POST','/action',{action:'brightness',brightness});persist();return;
  }
  if(event!=='click')return;
- if(control==='left'||control==='right')setScene(ids[(ids.indexOf(selected)+(control==='right'?1:ids.length-1))%ids.length]);
+ if(compo.enabled&&(control==='left'||control==='right')){selectDemo(demoIDs[(demoIDs.indexOf(compo.id)+(control==='right'?1:demoIDs.length-1))%demoIDs.length],false);return;}
+ if(compo.enabled&&control==='knob'){compo.autoplay=!compo.autoplay;persist();return;}
+ if(control==='middle'&&compoSession){
+  if(compo.enabled){compo.enabled=false;clock=false;}
+  else if(!clock)clock=true;
+  else{clock=false;compo.enabled=true;compo.elapsed=0;compoLast=nativeTime();}
+  clockApplied=false;persist();return;
+ }
+ if(control==='left'||control==='right')setScene(ids[(ids.indexOf(selected)+(control==='right'?1:ids.length-1))%ids.length],compoSession);
  else if(control==='middle')setClock(!clock);
  else if(control==='knob')replay();
 };
-function status(){return {version:1,engine:'local-quickjs',palette_rendering:'contrast-accents-v1',resolution:[52,16],scene:selected,scenes:ids,day,count,visual_capacity:20,visible_count:visible,revision,clock,brightness,last_sync:lastSync,queue:queue.length,animation:active?{ordinal:active.n,demo:active.demo,seconds:Math.max(0,nativeTime()-active.start),duration:active.duration}:null,theme,...nativeInfo()};}
+function status(){return {version:1,engine:'local-quickjs',palette_rendering:'contrast-accents-v1',resolution:[52,16],scene:selected,scenes:ids,day,count,visual_capacity:20,visible_count:visible,revision,clock,brightness,last_sync:lastSync,queue:queue.length,animation:active?{ordinal:active.n,demo:active.demo,seconds:Math.max(0,nativeTime()-active.start),duration:active.duration}:null,theme,mode:compo.enabled?'compo':clock?'clock':'stories',compo:demos?{...compo,number:demoIDs.indexOf(compo.id)+1,name:demos.catalogue.find(s=>s.id===compo.id).name,total:demoIDs.length}:null,...nativeInfo()};}
 g.storyRequest=function(method,path,body){
  resetDay();
  if(method==='GET'&&path==='/status')return status();
+ if(method==='GET'&&path==='/demos')return demos?demos.catalogue:[];
+ if(method==='POST'&&path==='/demo'){
+  if(!demos)throw Error('compo module not installed');
+  if(body.enabled===false){compo.enabled=false;compoSession=false;clock=false;persist();return status();}
+  if(body.autoplay!==undefined&&typeof body.autoplay!=='boolean')throw Error('autoplay must be boolean');
+  selectDemo(body.id||compo.id,body.autoplay!==false);return status();
+ }
  if(method==='PUT'&&path==='/state'){
   if(body.day!==today()||!Number.isSafeInteger(body.count)||body.count<0||body.count>100000||!Number.isSafeInteger(body.revision)||body.revision<1)throw Error('invalid daily state');
   lastSync=Number.isFinite(body.asof)?body.asof:lastSync;
@@ -80,9 +102,16 @@ g.storyRequest=function(method,path,body){
 function number(data,n,colour){const text=String(n);let width=text.length*4-1;for(let y=0;y<5;y++)for(let x=0;x<width;x++)data[y*52+x]=0;
  [...text].forEach((c,i)=>[...digits[+c]].forEach((b,j)=>{if(b==='1')data[Math.floor(j/3)*52+i*4+j%3]=colour;}));}
 g.storyTick=function(){
+ const now=nativeTime(),delta=Math.max(0,Math.min(1,now-compoLast));compoLast=now;
  resetDay();if(active&&nativeTime()-active.start>=active.duration)finish();begin();
  if(clock&&!active){if(!clockApplied){api('PUT','/scene',{base:'clock'});clockApplied=true;}return null;}
  clockApplied=false;
+ if(compo.enabled&&!active){
+  compo.elapsed+=delta;const meta=demos.catalogue.find(s=>s.id===compo.id);
+  if(compo.autoplay&&compo.elapsed>=meta.duration+1.15){selectDemo(demoIDs[(demoIDs.indexOf(compo.id)+1)%demoIDs.length],true,false);}
+  const elapsed=compo.autoplay||compo.elapsed<1.15?compo.elapsed:1.15+(compo.elapsed-1.15)%meta.duration;
+  return demos.rgb(demos.frame(compo.id,elapsed,theme,{title:true}));
+ }
  let n=active?active.n:visible,e=active?Math.max(0,(nativeTime()-active.start)/active.duration):null;
  const overflow=n>20;let data=art.frame(selected,Math.min(20,n),nativeTime(),overflow?null:e,{counter:false});
  // A completed 20-object world stays intact beyond 20; later payments still celebrate.

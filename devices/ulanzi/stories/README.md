@@ -67,3 +67,53 @@ Verified:
 The broader upstream native test suite currently reports 692/694 passing: an unused-byte comparison in the log-message roundtrip fixture fails and the TLS-worker test aborts in Zig's ML-KEM stack. Neither is used by this plaintext local frame path; no claim of a wholly green native suite is made.
 
 Rollback: stop the paid-order service, stop storyd, restore the recorded runtime configuration and previous ThemeSync binary/config. A power cycle without the host restores the stock Ulanzi application. There is no firmware flash to undo.
+
+
+## Omarchy / Tiny Compo
+
+`demos.js` adds 20 distinct deterministic animations at native 52×16, rendered locally
+by the same QuickJS engine at about 8 fps. Structural colours follow the active
+Omarchy accent and secondary colour; semantic colours remain readable. No audio,
+network assets, full-screen strobe or bitmap resampling is involved.
+
+```
+themesync ulanzi demo                 # automatic 20-entry show (~6 min 37 s)
+themesync ulanzi demo drive --manual  # loop one animated entry
+themesync ulanzi demo --list          # names, IDs, descriptions and durations
+themesync ulanzi scene garden        # leave the show for the order world
+```
+
+In demo mode, **− / +** choose entries and switch to a single animated entry.
+**Encoder click** toggles automatic / single-entry playback; rotation adjusts
+brightness. **Ulanzi** cycles demo → order world → clock → demo. Explicit CLI scene
+or clock commands leave the compo session. Encoder hold retains the native menu.
+
+The real paid counter continues updating. A new paid order temporarily shows the
+selected order-world story, then returns to the demo. The show timer pauses during
+that story. Gallery simulation never writes fake orders. Selected mode, manual entry
+and autoplay preference survive engine restart. Automatic advances do not write flash.
+
+The C host loads sibling `demos.js` between `renderer.js` and `device.js`; older
+installations without it retain order scenes and reject unavailable demo commands.
+`ensure_runtime.py` installs all four files. `POST /demo` accepts an optional `id`,
+`autoplay` boolean and `enabled:false` to leave the show; `GET /demos` returns the
+20-entry catalogue. The existing authenticated API and fixed-buffer limits apply.
+
+Browser gallery: `devices/ulanzi/compo/index.html` is a self-contained preview with
+all 20 entries, seek, play/pause, autoplay, six palette presets and optional LED grid.
+It contains no clock/API credentials and does not control the hardware.
+Rebuild it with `python3 devices/ulanzi/compo/build.py`.
+
+Export full-length 8-fps GIFs and a contact sheet (Node + Python/Pillow):
+
+```
+cd devices/ulanzi/compo
+node export.cjs
+python3 render_previews.py
+```
+
+`test-compo.cjs` samples all 2992 loop frames, checks distinct motion, bounds and
+LED-safe channels, then exercises autoplay without flash writes, selection, mode
+cycling, persistence and return after a paid-order alert. All 20 entries were also
+rendered and captured from the actual TC002 framebuffer; no failed frames were
+reported during that run.
