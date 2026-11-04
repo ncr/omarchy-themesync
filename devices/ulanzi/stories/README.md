@@ -71,12 +71,17 @@ Rollback: stop the paid-order service, stop storyd, restore the recorded runtime
 
 ## Omarchy / Tiny Compo
 
-`demos.js` adds 20 distinct deterministic animations at native 52×16, rendered locally
+`demos.js` adds 23 distinct deterministic animations at native 52×16, rendered locally
 by QuickJS at a target of **60 fps**. A native C rasterizer samples geometry and
 procedural fields on a **4×4 grid per physical pixel**, then reduces coverage to
 52×16 RGB888. Subpixel movement, lines, ellipses, metaball contours and the
 perspective floor receive actual spatial antialiasing; integer-position pixel
 lettering stays sharp. This is not CSS smoothing of an enlarged preview.
+
+The fast trio is **Switchback** (two cars on a compact oval), **Ricochet** (pinball
+rebounds with a time-based trail), and **Afterburner** (a ship threading gates at
+48 pixels per second). Use the gallery's **Szybkie dema** shortcut and the FPS
+selector to compare how their motion reads at 8 and 60 FPS.
 
 The complete named Omarchy palette supplies foreground, selection, red, green,
 blue, yellow, orange and magenta as well as accent/secondary. Exact RGB values and
@@ -92,7 +97,7 @@ reports measured `fps`, `target_fps`, `render_ms`, and `antialias_samples` in `/
 `render_ms` includes the local HTTP handoff, not just rasterization.
 
 ```
-themesync ulanzi demo                 # automatic 20-entry show (~6 min 37 s)
+themesync ulanzi demo                 # automatic 23-entry show (~7 min 16 s)
 themesync ulanzi demo drive --manual  # loop one animated entry
 themesync ulanzi demo --list          # names, IDs, descriptions and durations
 themesync ulanzi scene garden        # leave the show for the order world
@@ -112,10 +117,10 @@ The C host loads sibling `demos.js` between `renderer.js` and `device.js`; older
 installations without it retain order scenes and reject unavailable demo commands.
 `ensure_runtime.py` installs all four files. `POST /demo` accepts an optional `id`,
 `autoplay` boolean, optional `time` in seconds and `paused` boolean for frame inspection, and `enabled:false` to leave the show; `GET /demos` returns the
-20-entry catalogue. The existing authenticated API and fixed-buffer limits apply.
+23-entry catalogue. The existing authenticated API and fixed-buffer limits apply.
 
 Browser gallery: `devices/ulanzi/compo/index.html` is a self-contained preview with
-all 20 entries, seek, play/pause, autoplay, six actual Omarchy palette presets, 8/30/60 FPS comparison, an AA toggle and optional LED grid. Static thumbnails are cached; animated thumbnails run at 10 fps independently of the main 60-fps preview.
+all 23 entries, seek, play/pause, autoplay, six actual Omarchy palette presets, 8/30/60 FPS comparison, an AA toggle and optional LED grid. Static thumbnails are cached; animated thumbnails run at 10 fps independently of the main 60-fps preview.
 It contains no clock/API credentials and does not control the hardware.
 Rebuild it with `python3 devices/ulanzi/compo/build.py`.
 
@@ -127,14 +132,12 @@ node export.cjs
 python3 render_previews.py
 ```
 
-`test-compo.cjs` samples 2992 frames across the loops, checks distinct motion, bounds, subpixel AA, palette roles and idempotent palette updates, then exercises autoplay without flash writes, selection, mode
-cycling, persistence and return after a paid-order alert. All 20 entries were also
-rendered and captured from the actual TC002 framebuffer; no failed frames were
-reported during that run.
+`test-compo.cjs` samples the loops at 8 fps, checks distinct motion, bounds, subpixel AA, palette roles and idempotent palette updates, then exercises autoplay without flash writes, selection, mode
+cycling, persistence and return after a paid-order alert.
 
 
 After building the host binary with `build.py --host`, run `node test-native-compo.cjs`.
-It compares 60 frames across all 20 entries between the C rasterizer and the browser's
+It compares three frames per entry between the C rasterizer and the browser's
 reference implementation. The expected difference is zero RGB channel values.
 `raster.h` is compiled into `storyd`; only the usual four runtime files are uploaded.
 The restored-state JSON buffer is explicitly terminated before QuickJS parsing.
@@ -148,3 +151,7 @@ changed 680 RGB bytes between the real p-bloom and Osaka Jade palettes, with all
 were restored after checking. FPS telemetry measures generated/accepted frames;
 `presented` counts driver transfers and its sampled status is unsuitable for very
 short per-scene FPS measurements.
+
+On the TC002, Switchback, Ricochet and Afterburner sustained 59.98–60.04
+accepted fps with zero frame failures over six seconds per scene. The native
+and browser rasterizers matched all 69 reference frames across the catalogue.

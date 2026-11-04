@@ -22,7 +22,10 @@ const catalogue=[
  ['windows','Window Ballet','Mała choreografia kafelkowego pulpitu','omarchy',20],
  ['moon','Moon Harbour','Podejście, lądowanie i rozładunek na Księżycu','kosmos',24],
  ['gears','Clockwork','Koła zębate i kulka w wiecznym obiegu','mechanika',18],
- ['forever','Omarchy Forever','Typografia, refleksy i ukłon na finał','finał',16]
+ ['forever','Omarchy Forever','Typografia, refleksy i ukłon na finał','finał',16],
+ ['switchback','Switchback','Dwa mikrosamochody walczą o pozycję na ciasnym owalu','szybkie demo',12],
+ ['ricochet','Ricochet','Jasna kula odbija się od zderzaków i łapek pinballa','szybkie demo',12],
+ ['afterburner','Afterburner','Przelot przez neonowe bramki z dopalaczem i paralaksą','szybkie demo',12]
 ].map((a,i)=>({id:a[0],name:a[1],description:a[2],genre:a[3],duration:a[4],number:i+1}));
 const FONT={A:'010101111101101',B:'110101110101110',C:'011100100100011',D:'110101101101110',E:'111100110100111',F:'111100110100100',G:'011100101101011',H:'101101111101101',I:'111010010010111',J:'001001001101010',K:'101101110101101',L:'100100100100111',M:'101111111101101',N:'101111111111101',O:'010101101101010',P:'110101110100100',Q:'010101101111011',R:'110101110101101',S:'011100010001110',T:'111010010010010',U:'101101101101111',V:'101101101101010',W:'101101111111101',X:'101101010101101',Y:'101101010010010',Z:'111001010100111',0:'111101101101111',1:'010110010010111',2:'111001111100111',3:'111001111001111',4:'101101111001001',5:'111100111001111',6:'111100111101111',7:'111001010010010',8:'111101111101111',9:'111101111001111','>':'100010001010100','/':'001001010100100','-':'000000111000000','.':'000000000000010',':':'000010000010000','_':'000000000000111','+':'000010111010000','!':'010010010000010',' ':'000000000000000'};
 const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v)),mix=(a,b,t)=>a+(b-a)*clamp(t),ease=t=>{t=clamp(t);return t*t*(3-2*t);},part=(t,a,b)=>ease((t-a)/(b-a));
@@ -108,6 +111,104 @@ scenes.windows=(d,t,c)=>{let s=t%20,q=part(s,3,7),r=part(s,12,16),left=mix(31,23
 scenes.moon=(d,t,c)=>{stars(d,t,c,12);d.line(0,15,51,15,c.d);d.ellipse(9,15,5,2,c.m);d.ellipse(44,15,6,2,c.d);d.sprite(1,8,['.AA...','AAA...','.A....','.A..A.','.AAAA.','....A.'],{A:c.b});let s=t%24,x=s<10?mix(52,29,part(s,0,10)):s<18?29:mix(29,52,part(s,18,24)),y=s<10?mix(1,9,part(s,0,10)):s<18?9:mix(9,-5,part(s,18,24));d.sprite(x,y,['..AAA..','.AAAAA.','AAWWAAA','.AAAAA.','A.....A'],{A:c.a,W:c.white});if(s<10||s>18){let flame=Math.floor(t*5)%2;d.line(x+2,y+4,x+2,y+5+flame,c.orange);d.line(x+4,y+4,x+4,y+5+flame,c.gold);}if(s>=12&&s<17){let px=mix(31,21,part(s,12,17));d.rect(px,12,3,3,c.gold);person(d,px-2,10,c,t);}d.line(17,6,17,14,c.white);d.sprite(18,6,['BBBB','BBB.'],{B:c.b});};
 scenes.gears=(d,t,c)=>{const gear=(x,y,r,phase,col)=>{d.ellipse(x,y,r-1,r-1,col);for(let i=0;i<8;i++){let a=i/8*TAU+phase;d.p(x+Math.cos(a)*r,y+Math.sin(a)*r,col);}d.p(x,y,c.white);};gear(10,9,5,t*.8,c.a);gear(19,9,4,-t*.8,c.b);gear(26,10,3,t*.8,c.a);d.line(29,14,50,14,c.m);d.line(31,6,48,2,c.d);let s=t%18,x,y;if(s<7){x=mix(48,31,s/7);y=mix(1,5,s/7);}else if(s<10){x=31;y=mix(5,12,(s-7)/3);}else if(s<15){x=mix(31,49,(s-10)/5);y=12;}else{x=49;y=mix(12,1,(s-15)/3);}d.ellipse(x,y,1,1,c.gold,true);for(let i=0;i<7;i++)d.p(31+i*3+(t%1),15,c.d);d.line(50,2,50,14,c.b);};
 scenes.forever=(d,t,c)=>{stars(d,t,c,13);d.text('OMARCHY',12,4,c.a);d.text('MAKE ART',10,11,c.b);let x=(t*7)%68-8;for(let y=4;y<9;y++)for(let xx=Math.max(0,Math.floor(x));xx<Math.min(52,x+2);xx++)if(d.sample(xx,y))d.p(xx,y,c.white);let q=(t%16)/16;d.line(3,9,3+q*45,9,c.d);d.p(2,5+Math.sin(t),c.gold);d.p(49,5-Math.sin(t),c.gold);};
+// Draw the recent path behind the object, using time rather than frame count.
+function wake(d,position,t,col,length=.10){
+ const steps=5;
+ for(let i=steps;i>0;i--){
+  const a=position(t-i*length/steps),b=position(t-(i-1)*length/steps);
+  d.line(a[0],a[1],b[0],b[1],shade(col,.13+.43*(steps-i)/(steps-1)));
+ }
+}
+function racer(d,t,lane,phase,c,col){
+ const position=u=>{
+  const a=u*TAU/2.4+phase;
+  return [25.5+lane*Math.cos(a),7.5+(lane===18?5.25:3.85)*Math.sin(a)];
+ };
+ wake(d,position,t,col,.13);
+ const [x,y]=position(t),[ax,ay]=position(t+.01),v=Math.hypot(ax-x,ay-y);
+ const dx=(ax-x)/v,dy=(ay-y)/v;
+ d.line(x-dx*1.4,y-dy*1.4,x+dx,y+dy,col);
+ d.p(x+dy*.75-dx*.65,y-dx*.75-dy*.65,shade(col,.65));
+ d.p(x-dy*.75-dx*.65,y+dx*.75-dy*.65,shade(col,.65));
+ d.p(x+dx,y+dy,c.white);
+}
+scenes.switchback=(d,t,c)=>{
+ d.ellipse(25.5,7.5,21.75,7.3,shade(c.d,.70),true);
+ d.ellipse(25.5,7.5,14.25,2.8,0,true);
+ d.ellipse(25.5,7.5,21.7,7.25,shade(c.a,.38));
+ for(let i=0;i<16;i++){
+  const a=i*TAU/16;
+  d.p(25.5+17.4*Math.cos(a),7.5+4.6*Math.sin(a),shade(c.white,.31));
+ }
+ for(let y=0;y<4;y++)for(let x=0;x<2;x++)
+  d.p(25+x,y+1,shade((x+y)%2?c.white:c.d,.65));
+ d.text('LAP',20,5,shade(c.white,.52));
+ racer(d,t,18,Math.PI*.9,c,c.a);
+ racer(d,t,16,Math.PI*1.24,c,c.orange);
+};
+
+const reboundPoints=[[5,11],[16,2],[30,12],[46,4],[38,2],[24,13],[13,4],[5,11]];
+const reboundStops=[0];
+for(let i=1;i<reboundPoints.length;i++){
+ const a=reboundPoints[i-1],b=reboundPoints[i];
+ reboundStops.push(reboundStops[i-1]+Math.hypot(b[0]-a[0],b[1]-a[1]));
+}
+const reboundLength=reboundStops[reboundStops.length-1];
+function reboundPosition(t){
+ const s=((t%2.4+2.4)%2.4)*reboundLength/2.4;
+ let i=0;
+ while(s>=reboundStops[i+1]&&i<reboundPoints.length-2)i++;
+ const a=reboundPoints[i],b=reboundPoints[i+1],q=(s-reboundStops[i])/(reboundStops[i+1]-reboundStops[i]);
+ return [mix(a[0],b[0],q),mix(a[1],b[1],q),s];
+}
+scenes.ricochet=(d,t,c)=>{
+ const [x,y,s]=reboundPosition(t);
+ d.box(0,0,52,16,c.d);
+ d.line(1,1,50,1,shade(c.a,.40));d.line(1,14,50,14,shade(c.a,.40));
+ for(const [i,cy,col] of [[1,3,c.b],[2,12,c.gold],[4,3,c.b],[5,12,c.gold],[6,4,c.b]]){
+  const bx=reboundPoints[i][0],elapsed=(s-reboundStops[i]+reboundLength)%reboundLength;
+  const glow=clamp(1-elapsed/6);
+  d.ellipse(bx,cy,1.8,1.3,shade(col,.22+glow*.5),true);
+  d.p(bx,cy,shade(col,.62+glow*.38));
+ }
+ for(const [i,dir] of [[0,1],[3,-1]]){
+  const [px,py]=reboundPoints[i],elapsed=(s-reboundStops[i]+reboundLength)%reboundLength;
+  const kick=clamp(1-elapsed/5);
+  d.line(px-3*dir,py+dir,px,py+dir*(1-kick*2),c.a);
+ }
+ wake(d,reboundPosition,t,c.a,.12);
+ d.ellipse(x,y,1.1,1.1,c.white,true);
+};
+
+const jetY=t=>7.5+3.5*Math.sin(t*TAU/3)+.6*Math.sin(t*TAU/1.5);
+const jetX=t=>12+2.5*Math.sin(t*TAU/4);
+scenes.afterburner=(d,t,c)=>{
+ // Each gate is aimed at the ship's future position when it crosses the cockpit.
+ const s=((t%1.5)+1.5)%1.5;
+ for(let i=0;i<12;i++){
+  const speed=i<7?17:38,period=i<7?68:76;
+  const x=((hash(i+40)%period-t*speed)%period+period)%period-9;
+  const y=hash(i+90)%16;
+  d.line(x,y,x-(i<7?1:4),y,shade(i<7?c.d:c.a,i<7?.8:.3));
+ }
+ for(let i=-1;i<=1;i++){
+  const launch=t-s+i*1.5;
+  const x=61-(t-launch)*48;
+  if(x<-3||x>54)continue;
+  const cy=jetY(launch+1);
+  for(const [a,b] of [[0,cy-3.3],[cy+3.3,15]]){
+   d.rect(x,a,2,b-a+.6,shade(c.b,.54));
+   d.line(x+2,a,x+2,b,shade(c.a,.52));
+  }
+  d.rect(x-1,cy-3.5,4,1,c.b);d.rect(x-1,cy+3.5,4,1,c.b);
+ }
+ const x=jetX(t),y=jetY(t),f=1.3+.9*(1+Math.sin(t*TAU*7));
+ d.line(x-4-f,y,x-3,y,shade(c.orange,.58));
+ d.line(x-3,y,x,y,c.gold);
+ d.sprite(x-3,y-2,['.AA....','AAAWAA.','.AWWWWW','AAAWAA.','.AA....'],{A:c.a,W:c.white});
+ d.p(x+1,y-1,c.blue);
+};
+
 function frame(id,t=0,theme={},options={}){const meta=catalogue.find(s=>s.id===id);if(!meta)throw Error('Unknown demo '+id);const d=surface(options.antialias!==false),c=palette(theme);t=Math.max(0,t);if(options.title&&t<1.15){d.text(String(meta.number).padStart(2,'0'),1,1,c.a);let words=meta.name.toUpperCase().split(' '),line=words[0].slice(0,11),second=words.slice(1).join(' ').slice(0,12);d.text(line,11,1,c.b);d.text(second||'TINY COMPO',2,9,c.a);}else scenes[id](d,options.title?t-1.15:t,c);return d.finish();}
 function rgb(data){const a=new Uint8Array(W*H*3);for(let i=0;i<data.length;i++){a[i*3]=data[i]>>>16&255;a[i*3+1]=data[i]>>>8&255;a[i*3+2]=data[i]&255;}return a;}
 g.UlanziDemos={W,H,catalogue,frame,rgb,palette};if(typeof module!=='undefined'&&module.exports)module.exports=g.UlanziDemos;

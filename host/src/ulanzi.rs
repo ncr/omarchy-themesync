@@ -47,7 +47,7 @@ pub enum Command {
     },
     /// Replay the current scene animation without changing the real paid count.
     Replay,
-    /// Play the 20 native pixel-art demos; --manual holds one animated entry.
+    /// Play the native pixel-art demos; --manual holds one animated entry.
     Demo {
         name: Option<String>,
         #[arg(long)]
