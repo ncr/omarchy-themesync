@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 %h/dev/omarchy-themesync/devices/ulanzi/stories/paid_orders.py --config %h/.config/themesync/paid-orders.json
+ExecStart=/usr/bin/python3 %h/.local/share/themesync/ulanzi/paid_orders.py --config %h/.config/themesync/paid-orders.json
 Restart=on-failure
 RestartSec=10
 UMask=0077
