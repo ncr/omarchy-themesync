@@ -309,5 +309,7 @@ function frame(id,view,theme={},t=0){
 }
 function rgb(data){const out=new Uint8Array(W*H*3);for(let i=0;i<data.length;i++){out[i*3]=data[i]>>>16&255;out[i*3+1]=data[i]>>>8&255;out[i*3+2]=data[i]&255;}return out;}
 g.UlanziOrders={W,H,DAY,scenes,frame,rgb,palette,weight};
+// The compo loops (demos.js) draw with the same rasterizer and palette.
+g.UlanziPixels={W,H,surface,palette,rgb,scale,blend,hsv,hueGap,clamp,ease,part,hash,unit,frac};
 if(typeof module!=='undefined'&&module.exports)module.exports=g.UlanziOrders;
 })(typeof globalThis!=='undefined'?globalThis:this);

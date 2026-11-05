@@ -112,12 +112,11 @@ Europe/Warsaw day, deduplicates orders, resets at midnight and queues new animat
 The initial count is applied quietly. Its separate `themesync-paid-orders.service`
 keeps API retries and device recovery independent of the BLE daemon.
 
-**Omarchy / Tiny Compo** adds 28 independent pixel animations: terminal rituals,
-isometric architecture, hyperspace, a café, a jazz quartet, tiling windows and more.
-Start the automatic show with `themesync ulanzi demo`, select an entry with
-`themesync ulanzi demo cube --manual`, or browse the self-contained
-[28-animation gallery](devices/ulanzi/compo/index.html). Real paid-order updates stay
-active and their animations temporarily interrupt the show.
+**Compo** adds eight seamless loops in the same visual language as the order scenes:
+Pendulums, Fireflies, Harmonograph, Ripples, Aurora, Bloom, Lace and Tide. Start the
+automatic show with `themesync ulanzi demo`, hold one with `themesync ulanzi demo lace --manual`,
+or browse the [gallery](devices/ulanzi/compo/index.html). Real paid-order updates stay
+active and their arrivals temporarily interrupt the show.
 
 See the [scene engine and BaseLinker guide](devices/ulanzi/stories/README.md) for build,
 configuration, payment-history coverage and tests. The animations run without the

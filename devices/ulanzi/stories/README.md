@@ -74,107 +74,29 @@ Baseline validation of the broader upstream native suite reported 692/694 passin
 Rollback: stop the paid-order service, stop storyd, restore the recorded runtime configuration and previous ThemeSync binary/config. A power cycle without the host restores the stock Ulanzi application. There is no firmware flash to undo.
 
 
-## Omarchy / Tiny Compo
+## Compo
 
-`demos.js` adds 28 distinct deterministic animations at native 52×16, rendered locally
-by QuickJS at a target of **60 fps**. A native C rasterizer samples geometry and
-procedural fields on a **4×4 grid per physical pixel**, then reduces coverage to
-52×16 RGB888. Subpixel movement, lines, ellipses, metaball contours and the
-perspective floor receive actual spatial antialiasing; integer-position pixel
-lettering stays sharp. This is not CSS smoothing of an enlarged preview.
+`demos.js` holds eight seamless loops at native 52×16 and 60 fps, drawn with the order scenes' rasterizer and theme palette (`renderer.js` exports both as `UlanziPixels`, and storyd loads it first):
 
-The fast trio is **Switchback** (two cars on a compact oval), **Ricochet** (pinball
-rebounds with a time-based trail), and **Afterburner** (a ship threading gates at
-48 pixels per second). Use the gallery's **Szybkie dema** shortcut and the FPS
-selector to compare how their motion reads at 8 and 60 FPS.
+| id | loop | length |
+|---|---|---|
+| `pendulums` | thirteen pendulums with 18…30 swings per loop: waves, chaos, one line again | 30 s |
+| `fireflies` | fireflies over grass slowly synchronise their flashes, hold, and drift apart | 24 s |
+| `harmonograph` | a decaying 3:2 harmonograph draws, turns and fades | 24 s |
+| `ripples` | raindrops and thin rings spreading over dark water | 20 s |
+| `aurora` | aurora curtains with rays above a mountain ridge | 24 s |
+| `bloom` | three flowers open and close in one breath | 20 s |
+| `lace` | Truchet lace: tiles turn one by one and the pattern flows on | 24 s |
+| `tide` | the moon, a silver path on the waves and a passing cloud | 24 s |
 
-The complete named Omarchy palette supplies foreground, selection, red, green,
-blue, yellow, orange and magenta as well as accent/secondary. Exact RGB values and
-derived shades survive; changing a non-accent colour also synchronizes. The dark
-unoccupied background remains off. No audio, network assets or full-screen strobe.
-
-Continuous HTTP frames have an independent 90-Hz admission budget (60-Hz producer
-plus scheduling margin); discrete frames retain their 10-Hz limit. Continuous
-streams use a linear coverage LUT with the same full-intensity brightness peak as
-the legacy curve, avoiding its artificial minimum-channel lift. Clock/discrete
-rendering retains the legacy curve. The loop uses absolute 60-Hz deadlines and
-reports measured `fps`, `target_fps`, `render_ms`, and `antialias_samples` in `/status`.
-`render_ms` includes the local HTTP handoff, not just rasterization.
+Each loop is a pure function of time and ends exactly where it began. Colours: the theme's accent and secondary first, the warmest theme hue for light sources (fireflies, flower hearts), the foreground for highlights. Faint details stay very dim on purpose: on the LEDs low values look much brighter than on a screen.
 
 ```
-themesync ulanzi demo                 # automatic 28-entry show (~7 min 56 s)
-themesync ulanzi demo drive --manual  # loop one animated entry
-themesync ulanzi demo --list          # names, IDs, descriptions and durations
-themesync ulanzi scene hours         # leave the show for the order scenes
+themesync ulanzi demo                  # automatic show
+themesync ulanzi demo lace --manual    # hold one loop
+themesync ulanzi demo --list
 ```
 
-Three short loops use scene colours for water, hot steel and paper, with accents
-from the active theme. Open them individually on a device running the updated
-`demos.js`:
+In demo mode **− / +** choose a loop, **encoder click** toggles the automatic show, rotation sets brightness, **Ulanzi** cycles demo → order scenes → clock → demo. A new paid order shows its arrival in the selected order scene, then the show resumes. `POST /demo` accepts `id`, `autoplay`, `time` and `paused`; `GET /demos` returns the catalogue.
 
-```sh
-themesync ulanzi demo lighthouse --manual  # Night Beacon, 8 s
-themesync ulanzi demo forge --manual       # Ember Forge, 6 s
-themesync ulanzi demo kites --manual       # Kite Festival, 8 s
-```
-
-Two six-second pop-art loops pair bright colour panels with black silhouettes
-and white wired earbuds:
-
-```sh
-themesync ulanzi demo pocket-groove --manual
-themesync ulanzi demo cable-closeup --manual
-```
-
-In demo mode, **− / +** choose entries and switch to a single animated entry.
-**Encoder click** toggles automatic / single-entry playback; rotation adjusts
-brightness. **Ulanzi** cycles demo → order world → clock → demo. Explicit CLI scene
-or clock commands leave the compo session. Encoder hold retains the native menu.
-
-The real paid counter continues updating. A new paid order temporarily shows the
-selected order-world story, then returns to the demo. The show timer pauses during
-that story. Gallery simulation never writes fake orders. Selected mode, manual entry
-and autoplay preference survive engine restart. Automatic advances do not write flash.
-
-The C host loads sibling `demos.js` between `renderer.js` and `device.js`; older
-installations without it retain order scenes and reject unavailable demo commands.
-`ensure_runtime.py` installs all four files. `POST /demo` accepts an optional `id`,
-`autoplay` boolean, optional `time` in seconds and `paused` boolean for frame inspection, and `enabled:false` to leave the show; `GET /demos` returns the
-28-entry catalogue. The existing authenticated API and fixed-buffer limits apply.
-
-Browser gallery: `devices/ulanzi/compo/index.html` is a self-contained preview with
-all 28 entries, seek, play/pause, autoplay, six actual Omarchy palette presets, 8/30/60 FPS comparison, an AA toggle and optional LED grid. Static thumbnails are cached; animated thumbnails run at 10 fps independently of the main 60-fps preview.
-It contains no clock/API credentials and does not control the hardware.
-Rebuild it with `python3 devices/ulanzi/compo/build.py`.
-
-Export full-length 8-fps GIFs and `contact-sheet.png` (Node + Python/Pillow):
-
-```
-cd devices/ulanzi/compo
-node export.cjs
-python3 render_previews.py
-```
-
-`test-compo.cjs` samples the loops at 8 fps, checks distinct motion, bounds, subpixel AA, palette roles and idempotent palette updates, then exercises autoplay without flash writes, selection, mode
-cycling, persistence and return after a paid-order alert.
-
-
-After building the host binary with `build.py --host`, run `node test-native-compo.cjs`.
-It compares three frames per entry between the C rasterizer and the browser's
-reference implementation. The expected difference is zero RGB channel values.
-`raster.h` is compiled into `storyd`; only the usual four runtime files are uploaded.
-The restored-state JSON buffer is explicitly terminated before QuickJS parsing.
-
-Hardware verification after deployment: the six heavier entries (voxel, floor,
-liquid, cube, silk, windows) measured 59.97–60.04 accepted fps with zero frame
-failures; their render-plus-handoff averages were 8.1–11.4 ms. Native and browser
-renderers matched all 60 reference frames exactly. A frozen Pacific Drive frame
-changed 680 RGB bytes between the real p-bloom and Osaka Jade palettes, with all
-11 palette roles read back from the device. Settings and the real paid counter
-were restored after checking. FPS telemetry measures generated/accepted frames;
-`presented` counts driver transfers and its sampled status is unsuitable for very
-short per-scene FPS measurements.
-
-On the TC002, Switchback, Ricochet and Afterburner sustained 59.98–60.04
-accepted fps with zero frame failures over six seconds per scene. The native
-and browser rasterizers matched all 69 reference frames across the catalogue.
+On the TC002 (2026-11-05) all eight ran at 59.4–60 fps with zero frame failures; render plus handoff 8–15 ms. `node test-compo.cjs` checks seamless loops, motion, theme response, autoplay without flash writes, controls, persistence and the return after a paid order. Gallery: `devices/ulanzi/compo/index.html`, rebuilt with `python3 devices/ulanzi/compo/build.py`.
