@@ -90,15 +90,16 @@ and apply the patch before building.
 ### Daily paid-order scenes
 
 Set `"stories": true` in `~/.config/themesync/ulanzi.json` after installing the local
-scene engine. Six worlds run directly on the native 52×16 panel: a city, railway,
-space, vinyl club, crane workshop and garden. Calm animation keeps them alive; a paid
-order triggers a complete scene-specific story. Structural accents and the counter follow the desktop theme, with saturated LED
-colours and an unlit background. Semantic colours such as warm windows and foliage
-remain readable; the native clock also follows the desktop theme.
+scene engine. Five scenes show today's paid orders on the native 52×16 panel, each order
+placed by the time it was paid and sized or coloured by its value: **Liczydło** (hour rods
+with beads), **Gwiazdozbiór** (stars across the day), **Słoik** (marbles settling into a
+mound), **Tablica** (a split-flap board with the count and the two latest times) and
+**Witraż** (stained-glass panes). A new paid order plays its arrival; colours follow the
+desktop theme. They are designed for up to about 20 orders a day and stay correct above it.
 
 ```bash
-themesync ulanzi scene rail
-themesync ulanzi scene garden
+themesync ulanzi scene board
+themesync ulanzi scene glass
 themesync ulanzi clock
 themesync ulanzi replay  # no change to the real paid count
 ```

@@ -1,365 +1,313 @@
-/* Native 52x16 story scenes. Every transported object has a carrier/support. */
-(function(global){
-  'use strict';
-  const W=52,H=16;
-  const C={black:0,amber:0xffa000,gold:0xffdc00,orange:0xff6000,red:0xff0000,
-    cyan:0x00d8ff,teal:0x008080,blue:0x004080,violet:0x9000ff,pink:0xff0080,
-    lime:0x60ff00,green:0x009000,brown:0x804000,cream:0xffe080};
-  const font={0:['111','101','101','101','111'],1:['010','110','010','010','111'],
-    2:['111','001','111','100','111'],3:['111','001','111','001','111'],4:['101','101','111','001','001'],
-    5:['111','100','111','001','111'],6:['111','100','111','101','111'],7:['111','001','010','010','010'],
-    8:['111','101','111','101','111'],9:['111','101','111','001','111']};
-  const themes=[
-    {id:'city',name:'Miasto po zmroku',tag:'Mieszkaniec wraca do domu',duration:18,
-     calm:'Nieregularne, delikatne migotanie ciepłych okien. Nigdy nie gasną.',
-     event:'Spacer do drzwi → wejście do domu → rozsuwa się zasłona.',
-     growth:'1 wpłata = 1 okno · wysoki środkowy dom ma 3 piętra'},
-    {id:'rail',name:'Mała kolej',tag:'Kolejarze dopinają wagony',duration:32,
-     calm:'Tli się palenisko, od czasu do czasu unosi się para.',
-     event:'Kolejarze wpychają wagon od prawej, spinają sprzęg i wnoszą paczkę.',
-     growth:'1 wpłata = 1 paczka · wagony dochodzą przy 1., 5., 9., 13. i 17. wpłacie'},
-    {id:'orbit',name:'Konstelacja dnia',tag:'Saturn i start małej rakiety',duration:26,
-     calm:'Niewielki refleks na pierścieniu Saturna.',
-     event:'Zapłon → lot do nowej gwiazdy → powrót do bazy.',
-     growth:'1 wpłata = 1 gwiazda · 4 konstelacje po 5 gwiazd'},
-    {id:'vinyl',name:'Klub winylowy',tag:'Gramofon i okładki z widocznymi płytami',duration:28,
-     calm:'Płyta powoli się obraca, delikatnie świeci wskaźnik wzmacniacza.',
-     event:'Kurier przynosi album i umieszcza go na ścianie ekspozycyjnej.',
-     growth:'1 wpłata = 1 okładka z wysuniętym winylem · losowe miejsca i kolory'},
-    {id:'maker',name:'Neonowy warsztat',tag:'Symetryczna suwnica i chwytak',duration:46,
-     calm:'Chwytak czeka nad pustym stanowiskiem podawania.',
-     event:'Podanie → chwyt → podniesienie → przejazd → odłożenie → powrót.',
-     growth:'1 wpłata = 1 klocek · 5 stosów budowanych od dołu'},
-    {id:'garden',name:'Ogród z lampionem',tag:'Wzrost roślin i zmienna pogoda',duration:60,
-     calm:'Chmura płynie równym tempem przez cały ogród; krople i motyl.',
-     event:'Chmura podlewa wybraną roślinę, a pod nią wyrasta nowa gałązka i kwiat.',
-     growth:'1 wpłata = 1 kwiat · losowe rośliny, najpierw dół, potem góra'}
-  ];
-  const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
-  const mix=(a,b,t)=>a+(b-a)*clamp(t);
-  const smooth=t=>{t=clamp(t);return t*t*(3-2*t);};
-  const between=(s,a,b)=>smooth((s-a)/(b-a));
-  const hash=n=>{n=Math.imul(n^0x9e3779b9,0x85ebca6b);n=Math.imul(n^(n>>>13),0xc2b2ae35);return (n^(n>>>16))>>>0;};
-  function shuffled(n,seed){const a=Array.from({length:n},(_,i)=>i);for(let i=n-1;i>0;i--){const j=hash(seed+i)%(i+1);[a[i],a[j]]=[a[j],a[i]];}return a;}
-  const colours=[C.cyan,C.orange,C.violet,C.lime,C.red,C.gold,C.pink,C.teal];
-  const colour=i=>colours[hash(i+1703)%colours.length];
-  function make(){
-    const data=new Uint32Array(W*H);
-    const p=(x,y,c)=>{x=Math.round(x);y=Math.round(y);if(x>=0&&x<W&&y>=0&&y<H)data[y*W+x]=c;};
-    const rect=(x,y,w,h,c)=>{for(let j=0;j<h;j++)for(let i=0;i<w;i++)p(x+i,y+j,c);};
-    const points=(x0,y0,x1,y1)=>{
-      x0=Math.round(x0);y0=Math.round(y0);x1=Math.round(x1);y1=Math.round(y1);
-      const out=[],dx=Math.abs(x1-x0),sx=x0<x1?1:-1,dy=-Math.abs(y1-y0),sy=y0<y1?1:-1;let err=dx+dy;
-      for(;;){out.push([x0,y0]);if(x0===x1&&y0===y1)break;const e=2*err;if(e>=dy){err+=dy;x0+=sx;}if(e<=dx){err+=dx;y0+=sy;}}
-      return out;
-    };
-    const line=(x0,y0,x1,y1,c,q=1)=>{const a=points(x0,y0,x1,y1);a.slice(0,Math.max(1,Math.ceil(a.length*clamp(q)))).forEach(([x,y])=>p(x,y,c));};
-    const outline=(x,y,w,h,c)=>{line(x,y,x+w-1,y,c);line(x,y+h-1,x+w-1,y+h-1,c);line(x,y,x,y+h-1,c);line(x+w-1,y,x+w-1,y+h-1,c);};
-    const sprite=(x,y,rows,palette)=>rows.forEach((row,j)=>[...row].forEach((key,i)=>{if(palette[key]!==undefined)p(x+i,y+j,palette[key]);}));
-    return {data,p,rect,line,outline,sprite,points};
+/* Today's paid orders as five native 52×16 scenes. Shared by QuickJS on the TC002, the preview and the tests.
+ * A scene sees only when each order was paid and its value, never who bought what. */
+(function(g){
+'use strict';
+const W=52,H=16,DAY=86400,TAU=Math.PI*2;
+const scenes=[
+ {id:'hours',name:'Liczydło',description:'Każda godzina doby to pręt, każde zamówienie to koralik w kolorze swojej wartości',duration:5},
+ {id:'sky',name:'Gwiazdozbiór',description:'Zamówienia to gwiazdy: w poziomie godzina, w pionie wartość, linie łączą je po kolei',duration:6},
+ {id:'jar',name:'Słoik',description:'Kulki spadają i układają się w kopiec; rozmiar to wartość, kolor to pora dnia',duration:6},
+ {id:'board',name:'Tablica',description:'Tablica przylotów: liczba zamówień i godziny dwóch ostatnich',duration:5},
+ {id:'glass',name:'Witraż',description:'Każde zamówienie to szybka witraża, większa przy większej wartości',duration:6}
+];
+const clamp=(v,a=0,b=1)=>v<a?a:v>b?b:v,mix=(a,b,t)=>a+(b-a)*clamp(t),ease=t=>{t=clamp(t);return t*t*(3-2*t);},part=(t,a,b)=>ease((t-a)/(b-a));
+const frac=x=>x-Math.floor(x);
+function hash(n){n=Math.imul(n^0x9e3779b9,0x85ebca6b);n=Math.imul(n^(n>>>13),0xc2b2ae35);return (n^(n>>>16))>>>0;}
+const unit=n=>hash(n)/4294967296;
+
+/* Colour. Theme roles are pushed to full LED brightness; scenes pick hues that stay apart. */
+const R=c=>c>>>16&255,G=c=>c>>>8&255,B=c=>c&255,byte=v=>v<0?0:v>255?255:Math.round(v);
+const rgb3=(r,gr,b)=>(byte(r)<<16)|(byte(gr)<<8)|byte(b);
+const scale=(c,q)=>rgb3(R(c)*q,G(c)*q,B(c)*q);
+const blend=(a,b,t)=>{t=clamp(t);return rgb3(R(a)+(R(b)-R(a))*t,G(a)+(G(b)-G(a))*t,B(a)+(B(b)-B(a))*t);};
+const parse=hex=>typeof hex==='string'&&/^#?[0-9a-fA-F]{6}$/.test(hex)?parseInt(hex.replace('#',''),16):null;
+function vivid(c){const r=R(c),gr=G(c),b=B(c),lo=Math.min(r,gr,b),k=Math.max(r,gr,b)>lo?.45:0,hi=Math.max(r,gr,b)-lo*k;return hi<8?0:rgb3((r-lo*k)*255/hi,(gr-lo*k)*255/hi,(b-lo*k)*255/hi);}
+function bright(c){const hi=Math.max(R(c),G(c),B(c));return hi<8?0xffffff:scale(c,255/hi);}
+function hsv(c){const r=R(c),gr=G(c),b=B(c),hi=Math.max(r,gr,b),lo=Math.min(r,gr,b),d=hi-lo;let h=0;
+ if(d)h=hi===r?((gr-b)/d+6)%6:hi===gr?(b-r)/d+2:(r-gr)/d+4;return {h:h*60,s:hi?d/hi:0};}
+const hueGap=(a,b)=>{const d=Math.abs(hsv(a).h-hsv(b).h)%360;return Math.min(d,360-d);};
+function pick(candidates,n){
+ // Theme order wins while hues stay clearly apart; only then the most distinct remaining hue.
+ const pool=candidates.filter(c=>c!==null&&hsv(c).s>.28),out=pool.slice(0,1);
+ for(const c of pool)if(out.length<n&&!out.includes(c)&&Math.min(...out.map(o=>hueGap(c,o)))>=45)out.push(c);
+ while(out.length<n){let best=null,gap=-1;for(const c of pool){if(out.includes(c))continue;const d=Math.min(...out.map(o=>hueGap(c,o)));if(d>gap+6){gap=d;best=c;}}if(best===null)break;out.push(best);}
+ return out;
+}
+let paletteKey=null,paletteCache=null;
+function palette(theme={}){
+ const roles=theme.colors||{},key=JSON.stringify([theme.accent,theme.secondary,roles]);
+ if(key===paletteKey)return paletteCache;
+ const role=k=>parse(roles[k]),accent=parse(theme.accent)??0x4cc9ff,second=parse(theme.secondary)??role('magenta')??0xb97aff;
+ const hues=pick([accent,second,role('yellow'),role('orange'),role('cyan'),role('red'),role('magenta'),role('green'),role('blue'),0xffc400,0xff4a3c,0x38c8ff,0x60e070,0xc060ff],5).map(vivid);
+ paletteKey=key;paletteCache={hues,tiers:hues.slice(0,3),white:bright(parse(roles.foreground)??0xe6e6ee)};
+ return paletteCache;
+}
+/* An order's value on a log scale: 5 zł → 0, 50 zł → .5, 500 zł → 1. Unknown values sit in the middle. */
+const weight=v=>v===null||v===undefined?.45:clamp((Math.log10(Math.max(1,v))-.699)/2);
+const tier=v=>{const w=weight(v);return w<.35?0:w<.7?1:2;};
+
+/* 4×4 coverage samples per physical pixel; the C rasterizer in storyd does the same work natively. */
+function surface(){
+ const S=4,SW=W*S,SH=H*S,native=typeof nativeRasterBegin==='function';
+ if(native)nativeRasterBegin(S);
+ const high=native?null:new Uint32Array(SW*SH);
+ const span=(a,b,n)=>[Math.max(0,Math.ceil((a+.5)*S-.5)),Math.min(n-1,Math.floor((b+.5)*S-.5))];
+ function rect(x,y,w,h,c){
+  if(native){nativeRasterRect(x,y,w,h,c);return;}
+  if(w<=0||h<=0)return;const [x0,x1]=span(x-.5,x+w-.5,SW),[y0,y1]=span(y-.5,y+h-.5,SH);
+  for(let j=y0;j<=y1;j++){const py=(j+.5)/S-.5;if(py<y-.5||py>=y+h-.5)continue;for(let i=x0;i<=x1;i++){const px=(i+.5)/S-.5;if(px>=x-.5&&px<x+w-.5)high[j*SW+i]=c;}}
+ }
+ function line(x,y,xx,yy,c){
+  if(native){nativeRasterLine(x,y,xx,yy,c);return;}
+  const [x0,x1]=span(Math.min(x,xx)-.5,Math.max(x,xx)+.5,SW),[y0,y1]=span(Math.min(y,yy)-.5,Math.max(y,yy)+.5,SH),dx=xx-x,dy=yy-y,len=dx*dx+dy*dy;
+  for(let j=y0;j<=y1;j++)for(let i=x0;i<=x1;i++){const px=(i+.5)/S-.5,py=(j+.5)/S-.5,q=len?clamp(((px-x)*dx+(py-y)*dy)/len):0,ex=px-x-q*dx,ey=py-y-q*dy;if(ex*ex+ey*ey<=.25)high[j*SW+i]=c;}
+ }
+ function ellipse(x,y,rx,ry,c,filled=false){
+  if(native){nativeRasterEllipse(x,y,rx,ry,c,filled);return;}
+  if(rx<=0||ry<=0)return;const [x0,x1]=span(x-rx-.5,x+rx+.5,SW),[y0,y1]=span(y-ry-.5,y+ry+.5,SH),r=Math.min(rx,ry);
+  for(let j=y0;j<=y1;j++)for(let i=x0;i<=x1;i++){const dx=((i+.5)/S-.5-x)/rx,dy=((j+.5)/S-.5-y)/ry,v=Math.sqrt(dx*dx+dy*dy);if(filled?v<=1:Math.abs(v-1)*r<=.5)high[j*SW+i]=c;}
+ }
+ function finish(){
+  if(native)return nativeRasterFinish();
+  const out=new Uint32Array(W*H),area=S*S;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){let r=0,gr=0,b=0;for(let j=0;j<S;j++)for(let i=0;i<S;i++){const c=high[(y*S+j)*SW+x*S+i];r+=c>>>16&255;gr+=c>>>8&255;b+=c&255;}out[y*W+x]=(Math.round(r/area)<<16)|(Math.round(gr/area)<<8)|Math.round(b/area);}
+  return out;
+ }
+ return {rect,line,ellipse,finish,dot:(x,y,c)=>rect(x,y,1,1,c)};
+}
+
+/* Type: 3×5 for small numbers and times, 5×10 split-flap digits for the board. */
+const SMALL={0:'111101101101111',1:'010110010010111',2:'111001111100111',3:'111001111001111',4:'101101111001001',5:'111100111001111',6:'111100111101111',7:'111001010010010',8:'111101111101111',9:'111101111001111','-':'000000111000000',' ':'000000000000000'};
+function glyph(d,ch,x,y,c,k=1,cy=y+2.5){const bits=SMALL[ch]||SMALL[' '];if(k<=.02)return;
+ for(let j=0;j<5;j++)for(let i=0;i<3;i++)if(bits[j*3+i]==='1')d.rect(x+i,cy+(y+j-cy)*k,1,k,c);}
+function number(d,n,x,y,c){[...String(n)].forEach((ch,i)=>glyph(d,ch,x+i*4,y,c));}
+const BIG=[
+ ['.###.','#...#','#...#','#...#','#...#','#...#','#...#','#...#','#...#','.###.'],
+ ['..#..','.##..','#.#..','..#..','..#..','..#..','..#..','..#..','..#..','#####'],
+ ['.###.','#...#','....#','....#','...#.','..#..','.#...','#....','#....','#####'],
+ ['.###.','#...#','....#','....#','.###.','....#','....#','....#','#...#','.###.'],
+ ['...#.','..##.','.#.#.','#..#.','#..#.','#####','...#.','...#.','...#.','...#.'],
+ ['#####','#....','#....','#....','####.','....#','....#','....#','#...#','.###.'],
+ ['.###.','#...#','#....','#....','####.','#...#','#...#','#...#','#...#','.###.'],
+ ['#####','....#','....#','...#.','...#.','..#..','..#..','..#..','..#..','..#..'],
+ ['.###.','#...#','#...#','#...#','.###.','#...#','#...#','#...#','#...#','.###.'],
+ ['.###.','#...#','#...#','#...#','.####','....#','....#','....#','#...#','.###.']
+];
+const clock=t=>{const m=Math.floor(t/60)%1440;return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');};
+
+/* Every scene but the board keeps the count in a free corner: top right, else top left, else bottom right. */
+function freeCorner(busy,w){
+ const spots=[[51-w,1],[1,1],[51-w,10],[1,10]];
+ for(const [x,y] of spots){let free=true;for(let j=y-1;j<=y+5&&free;j++)for(let i=x-1;i<=x+w;i++)if(busy(i,j)){free=false;break;}if(free)return [x,y];}
+ return spots[0];
+}
+function counter(d,n,busy,c){const w=String(n).length*4-1,[x,y]=freeCorner(busy,w);d.rect(x-1,y-1,w+2,7,0);number(d,n,x,y,c.white);}
+
+/* Liczydło: 24 rods, one per hour; beads stack in the order they were paid. */
+function hours(d,v,c,t){
+ const list=v.orders,ev=v.event,col=h=>2+2*h,nowX=1+2*v.now/3600,hourNow=Math.floor(v.now/3600);
+ const stacks=Array.from({length:24},()=>[]);list.forEach((o,i)=>stacks[clamp(Math.floor(o.t/3600),0,23)].push(i));
+ const tallest=Math.max(1,...stacks.map(s=>s.length)),pitch=Math.min(2,14/tallest);
+ const place=i=>{const h=clamp(Math.floor(list[i].t/3600),0,23);return [col(h),14.5-(stacks[h].indexOf(i)+1)*pitch+pitch/2];};
+ // LEDs make faint light look strong: hour marks stay very dim, only every sixth one is a real mark.
+ for(let h=0;h<24;h++)if(h<=hourNow||h%6===0)d.dot(col(h),15,scale(c.white,h%6===0?(h<=hourNow?.3:.1):.06));
+ // The live hour: a spark rises above its beads.
+ const top=14.5-stacks[hourNow].length*pitch,rise=frac(t/4);
+ if(top>2)d.dot(col(hourNow),Math.round(top-.5-(top-1.5)*rise),scale(c.white,.45*(1-rise)**2));
+ d.rect(nowX,15,1,1,c.white);
+ const last=list.length-1,s=ev?ev.s:99;
+ list.forEach((o,i)=>{
+  const colour=c.tiers[tier(o.v)];let [x,y]=place(i);
+  if(i===last&&ev){
+   if(s<.5){d.ellipse(x,0,.8,.8,scale(colour,s/.5),true);return;}
+   if(s<1.3)y=mix(0,y,((s-.5)/.8)**2);
+   else if(s<1.55)y-=.8*Math.sin(Math.PI*(s-1.3)/.25);
+   if(s>=1.3&&s<2.2){const q=(s-1.3)/.9;d.ellipse(x,y,.8+2.6*q,.8+2.6*q,scale(colour,.7*(1-q)));}
   }
-  function spark(d,x,y,t,palette=[C.gold,C.pink,C.cyan]){
-    if(t<=0||t>=1)return;
-    [[-2,-3],[2,-3],[-3,-1],[3,-1],[0,-4]].forEach(([vx,vy],i)=>{
-      const u=(t-i*.035)/.82;if(u>0&&u<1)d.p(x+vx*u*2,y+vy*u*2+u*u*8,palette[i%palette.length]);
-    });
+  if(pitch>=1.6)d.dot(x,ev&&i===last?y:Math.round(y),colour);else d.rect(x,y-pitch/2+.5,1,pitch,colour);
+ });
+ const shown=ev&&s<1.3?v.count-1:v.count;
+ counter(d,shown,(x,y)=>{if(y>=15)return false;const h=(x-1)>>1;return h>=0&&h<24&&stacks[h].length>0&&y>=14.5-stacks[h].length*pitch-1;},c);
+}
+
+/* Gwiazdozbiór: across = hour of payment, up = value; lines join the stars in the order they appeared. */
+function sky(d,v,c,t){
+ const list=v.orders,ev=v.event,s=ev?ev.s:99,last=list.length-1,nowX=1.5+48*v.now/DAY;
+ const star=o=>[Math.round(1.5+48*o.t/DAY),Math.round(13-11*weight(o.v))];
+ for(let x=1;x<nowX;x+=2)d.dot(x,15,scale(c.white,x%12===1?.22:.06));
+ d.rect(nowX,15,1,1,scale(c.white,.8));
+ const lineColour=scale(c.tiers[0],.13);
+ for(let i=1;i<list.length;i++){
+  const [x0,y0]=star(list[i-1]),[x1,y1]=star(list[i]);
+  if(i===last&&ev){if(s<2)continue;const q=part(s,2,2.9);d.line(x0,y0,x0+(x1-x0)*q,y0+(y1-y0)*q,lineColour);}
+  else d.line(x0,y0,x1,y1,lineColour);
+ }
+ list.forEach((o,i)=>{
+  const [x,y]=star(o),w=weight(o.v),colour=c.tiers[tier(o.v)],tw=.72+.28*Math.sin(t*(1.1+unit(i)*1.6)+unit(i+77)*TAU);
+  let core=blend(colour,c.white,.25+.2*w),flash=0;
+  if(i===last&&ev){
+   if(s<1.6){
+    // A comet brings the new star from the top right.
+    const path=u=>{u=ease(u);const a=1-u;return [a*a*Math.min(56,nowX+14)+2*a*u*(x+8)+u*u*x,a*a*-3+2*a*u*-2+u*u*y];};
+    const u=(s-.25)/1.35;if(u<0)return;
+    for(let k=7;k>=0;k--){const [cx,cy]=path(Math.max(0,u-k*.035));d.rect(cx,cy,1,1,k?scale(c.white,.55*(1-k/8)):c.white);}
+    return;
+   }
+   flash=1-part(s,1.6,2.8);
+   if(s<2.6){const q=(s-1.6);d.ellipse(x,y,.6+3.2*q,.6+3.2*q,scale(colour,.6*(1-q)));}
   }
-  const houseSpecs=[{x:0,top:7,rows:[12,9]},{x:11,top:6,rows:[11,8]},
-    {x:22,top:3,rows:[11,8,5]},{x:33,top:6,rows:[11,8]},{x:44,top:9,rows:[11]}];
-  const citySlots=houseSpecs.flatMap((h,g)=>h.rows.flatMap(y=>[1,5].map(dx=>({x:h.x+dx,y,g}))));
-  const railSlots=Array.from({length:20},(_,i)=>({x:12+Math.floor(i/4)*8+i%2*4,y:9-Math.floor(i%4/2)*3,g:Math.floor(i/4)}));
-  const orbitSlots=Array.from({length:20},(_,i)=>({x:14+Math.floor(i/5)%2*12+i%5*2,y:Math.floor(i/10)*8+(i%5%2?4:1)}));
-  const albumPlaces=Array.from({length:20},(_,i)=>({x:22+i%5*6,y:Math.floor(i/5)*4}));
-  const vinylSlots=shuffled(20,617).map(i=>albumPlaces[i]);
-  // Twin uprights frame the work area. The even-width cargo hangs from a
-  // half-pixel axis, with mirrored cable strands and mirrored gripper jaws.
-  const makerSlots=Array.from({length:20},(_,i)=>({x:11+Math.floor(i/4)*6,y:14-i%4*2,g:Math.floor(i/4)}));
-  const gardenSlots=[],plantLevels=[0,0,0,0,0];
-  for(let i=0;i<20;i++){
-    const available=[0,1,2,3,4].filter(g=>plantLevels[g]<4);
-    const g=available[hash(i+907)%available.length],stage=plantLevels[g]++;
-    const side=(stage%2)^(hash(g+23)%2);
-    gardenSlots.push({x:g*10+side*5,y:stage<2?10:6,g,stage});
+  core=blend(scale(core,tw),c.white,flash);
+  if(w>=.35){const arm=scale(colour,(w>=.7?.55:.28)*tw+.4*flash);d.dot(x-1,y,arm);d.dot(x+1,y,arm);d.dot(x,y-1,arm);d.dot(x,y+1,arm);
+   if(w>=.7){const tip=scale(colour,.18*tw+.3*flash);d.dot(x-2,y,tip);d.dot(x+2,y,tip);d.dot(x,y-2,tip);d.dot(x,y+2,tip);}}
+  d.dot(x,y,core);
+ });
+ const shown=ev&&s<1.6?v.count-1:v.count;
+ counter(d,shown,(x,y)=>{if(y>=15||x>=nowX+1)return false;return list.some((o,i)=>{const [sx,sy]=star(o);if(Math.abs(sx-x)<=2&&Math.abs(sy-y)<=2)return true;
+  if(!i)return false;const [px,py]=star(list[i-1]);if(x<Math.min(px,sx)||x>Math.max(px,sx))return false;const yy=px===sx?py:py+(sy-py)*(x-px)/(sx-px);return Math.abs(yy-y)<1.2;});},c);
+}
+
+/* Słoik: marbles drop through the top and settle into a mound, simulated once per marble. */
+const physics={key:'',balls:[],paths:[],columns:[]};
+function marbles(list,total){
+ // Marbles shrink in steps as the day fills up, so the whole pile is re-simulated only now and then.
+ const k=Math.max(.4,Math.min(1,Math.floor(Math.sqrt(55/Math.max(1,total))*20)/20)),key=k+'|';
+ if(physics.key!==key){physics.key=key;physics.balls=[];physics.paths=[];physics.columns=Array.from({length:W},()=>[]);}
+ for(let i=physics.balls.length;i<list.length;i++){
+  const r=Math.max(.5,k*(.85+1.25*weight(list[i].v))),dt=1/120,path=[];
+  // Later marbles fall from a wider mouth, so the mound spreads instead of towering.
+  let x=25.5+(unit(i*31+7)-.5)*Math.min(46,5+i*.8),y=-r-1,vx=(unit(i*17+3)-.5)*3,vy=4,calm=0,hit=-1;
+  for(let step=0;step<720&&calm<24;step++){
+   vy+=70*dt;if(step<40)vx+=(unit(i*977+step)-.5)*.4;x+=vx*dt;y+=vy*dt;let touching=false;
+   if(y>15.5-r){y=15.5-r;if(vy>0)vy=-vy*.3;vx*=.92;touching=true;}
+   if(x<r-.5){x=r-.5;vx=Math.abs(vx)*.4;}if(x>51.5-r){x=51.5-r;vx=-Math.abs(vx)*.4;}
+   const cx=Math.round(x);for(let col=Math.max(0,cx-3);col<=Math.min(W-1,cx+3);col++)for(const b of physics.columns[col]){const dx=x-b.x,dy=y-b.y,m=r+b.r,d2=dx*dx+dy*dy;if(d2>=m*m)continue;
+    const dd=Math.sqrt(d2)||1e-6,nx=dx/dd,ny=dy/dd;x=b.x+nx*m;y=b.y+ny*m;const vn=vx*nx+vy*ny;if(vn<0){vx-=1.3*vn*nx;vy-=1.3*vn*ny;}vx*=.993;vy*=.993;touching=true;}
+   if(touching&&hit<0)hit=path.length;
+   calm=touching&&vx*vx+vy*vy<.01?calm+1:0;
+   if(step%2===0)path.push([x,y]);
   }
-  const slots={city:citySlots,rail:railSlots,orbit:orbitSlots,vinyl:vinylSlots,maker:makerSlots,garden:gardenSlots};
-  function person(d,x,t,hand){
-    d.p(x,11,C.cream);d.line(x,12,x,14,C.blue);
-    const step=Math.floor(t*3)%2;d.p(x-1+step,15,C.blue);d.p(x+1-step,15,C.blue);
-    if(hand){d.line(x,12,hand.x,hand.y,C.cream);d.p(hand.x,hand.y,C.cream);}
-  }
-  function windowColour(i,t){
-    const phase=(t+hash(i+61)%41)%41;
-    const flicker=phase<2.8?Math.pow(Math.sin(phase*5.2),2)*.13:0;
-    const warmth=.02*Math.sin(t*.35+i*2.1);
-    const r=Math.round(255*(1-flicker*.35));
-    const g=Math.round(220*(1-flicker+warmth));
-    return r<<16|Math.min(235,g)<<8;
-  }
-  function city(d,n,t,e){
-    const s=(e??0)*18,idx=Math.max(0,n-1),target=citySlots[idx],placed=e===null||s>=11;
-    for(const h of houseSpecs){
-      d.line(h.x,15,h.x+7,15,C.brown);d.line(h.x,h.top,h.x,15,C.brown);d.line(h.x+7,h.top,h.x+7,15,C.brown);
-      d.line(h.x+1,h.top-1,h.x+6,h.top-1,C.brown);d.line(h.x+2,h.top-2,h.x+5,h.top-2,C.brown);d.rect(h.x+3,14,2,2,0);
-    }
-    citySlots.forEach((a,i)=>{if(i<n&&(i!==idx||placed))d.rect(a.x,a.y,2,2,windowColour(i,t));});
-    d.sprite(44,0,['.GGG.','GG...','GG...','.GGG.'],{G:C.gold});
-    if(e!==null&&n>0){
-      const door=houseSpecs[target.g].x+3;
-      if(s<7){const x=mix(53,door,between(s,0,5));person(d,x,s);if(s>5)d.rect(door,14,2,2,C.orange);}
-      if(s>=7&&s<11){d.rect(target.x,target.y,1+(s>9?1:0),2,C.gold);}
-      if(s>=12)spark(d,target.x,target.y,(s-12)/6,[C.gold,C.orange,C.cream]);
-    }
-  }
-  function railState(n,e){
-    const s=(e??0)*32,before=Math.max(0,n-1),wagons=Math.ceil(n/4),oldWagons=Math.ceil(before/4);
-    const needsWagon=wagons>oldWagons,target=railSlots[Math.max(0,n-1)];
-    const carryStart=needsWagon?18:0,carryEnd=needsWagon?25:13,placeAt=needsWagon?28:22;
-    const placed=e===null||s>=placeAt;
-    const wagonX=needsWagon&&e!==null?mix(54,12+(wagons-1)*8,between(s,0,14)):12+(wagons-1)*8;
-    const carrierStand=target.x+4;
-    let carrierX=mix(55,carrierStand,between(s,carryStart,carryEnd));
-    if(s>=placeAt)carrierX=mix(carrierStand,56,between(s,placeAt,32));
-    return {s,offset:0,load:placed?n:before,wagons,oldWagons,needsWagon,wagonX,
-      visibleWagons:e!==null&&needsWagon?oldWagons+(wagonX<52?1:0):wagons,
-      coupled:e===null||!needsWagon||s>=18,placed,carryStart,carryEnd,placeAt,carrierX,
-      cargoY:mix(target.y-2,target.y,between(s,carryEnd,placeAt))};
-  }
-  function railWorker(d,x,s,hand,pushing=false){
-    const lean=pushing?-1:0;
-    d.rect(x-1+lean,8,2,1,C.red);d.p(x+lean,9,C.cream);d.line(x,10,x,13,C.blue);
-    const stride=Math.floor(s*3)%2;d.p(x-1+stride,14,C.blue);d.p(x+1-stride,15,C.blue);
-    if(hand)d.line(x,11,hand.x,hand.y,C.cream);
-  }
-  function rail(d,n,t,e){
-    const state=railState(n,e),s=state.s;
-    d.line(0,15,51,15,C.brown);for(let x=1;x<52;x+=4)d.p(x,14,C.brown);
-    // The locomotive and all coupled wagons remain parked throughout delivery.
-    d.rect(1,10,10,3,C.cyan);d.rect(1,9,6,3,C.teal);d.outline(6,6,5,7,C.cyan);
-    d.rect(7,7,2,2,C.gold);d.rect(2,7,2,2,C.teal);d.p(0,11,C.cream);
-    d.p(8,11,0xff0000|Math.round(92+28*Math.sin(t*.7))<<8);d.p(9,11,C.red);
-    for(const x of [2,6,10]){d.sprite(x-1,12,['.R.','RRR','.R.'],{R:C.red});d.p(x,13,C.gold);}
-    function wagon(x,coupled,rolling=false){
-      if(coupled)d.p(x-1,12,C.brown);d.line(x,12,x+6,12,C.cyan);
-      for(const xx of [x+1,x+4]){d.rect(xx,13,2,2,C.blue);d.p(xx,rolling&&Math.floor(s*3)%2?13:14,C.cream);}
-    }
-    const fixed=e!==null&&state.needsWagon?state.oldWagons:state.wagons;
-    for(let g=0;g<fixed;g++)wagon(12+g*8,true);
-    if(e!==null&&state.needsWagon)wagon(state.wagonX,state.coupled,s<14);
-    function parcel(x,y,i){const c=colours[(hash(Math.floor(i/4)+57)+i%4*3)%colours.length];d.sprite(x,y,['KKK','KkK','KKK'],{K:c,k:C.cream});}
-    railSlots.forEach((a,i)=>{if(i<state.load)parcel(a.x,a.y,i);});
-    const ph=t%19;
-    if(ph<2.5){d.p(3+Math.floor(ph),6-Math.floor(ph),C.cream);if(ph>1){d.p(5,4,C.cream);d.p(6,3,C.blue);}}
-    if(e!==null&&n>0){
-      const a=railSlots[n-1],x=state.wagonX;
-      if(state.needsWagon&&s<14){
-        railWorker(d,x+2,s,{x:x+1,y:12},true);railWorker(d,x+5,s,{x:x+4,y:12},true);
-      }else if(state.needsWagon&&s<18){
-        railWorker(d,x-2,s,{x:x-1,y:12});railWorker(d,x+5,s,{x:x+6,y:12});d.p(x-1,12,C.gold);
-      }else if(state.needsWagon&&s<25){
-        for(const start of [x-2,x+5])railWorker(d,mix(start,56,between(s,18,25)),s);
-      }
-      if(s>=state.carryStart){
-        if(!state.placed){parcel(state.carrierX-4,state.cargoY,n-1);railWorker(d,state.carrierX,s,{x:state.carrierX-1,y:state.cargoY+3});}
-        else if(s<32)railWorker(d,state.carrierX,s);
-      }
-      if(s>state.placeAt)spark(d,a.x,a.y,(s-state.placeAt)/(32-state.placeAt));
-    }
-  }
-  function rocket(d,x,y,flame,facing=1){
-    const rows=['..R.....','.RRRR...','RRCRRRR.','.RRRR...','..R.....'];
-    d.sprite(x,y,facing<0?rows.map(row=>[...row].reverse().join('')):rows,{R:C.red,C:C.cyan});
-    if(flame){d.p(facing<0?x+8:x-1,y+2,C.gold);d.p(facing<0?x+9:x-2,y+2,C.orange);}
-  }
-  function orbit(d,n,t,e){
-    const s=(e??0)*26,idx=Math.max(0,n-1),a=orbitSlots[idx];
-    const shown=e!==null&&s<15?n-1:n;
-    d.sprite(41,6,['..VVV..','.VVVVV.','VVvVVVV','VVvvVVV','VVVvVVV','.VVVVV.','..VVV..'],{V:C.violet,v:C.blue});
-    d.line(38,11,51,7,C.orange);d.line(38,12,51,8,C.gold);
-    orbitSlots.forEach((p,i)=>{if(i<shown&&i%5){const b=orbitSlots[i-1];d.line(b.x,b.y,p.x,p.y,C.blue);}});
-    orbitSlots.forEach((p,i)=>{if(i<shown)d.sprite(p.x-1,p.y-1,['.S.','SSS','.S.'],{S:C.gold});});
-    if(e===null){rocket(d,1,8,false);if(t%45<1.5)d.p(49,8,C.cream);}
-    else{
-      let x=1,y=8;
-      if(s<5){rocket(d,x,y,s>1);return;}
-      if(s<15){const q=between(s,5,15);x=mix(1,a.x-3,q);y=mix(8,Math.max(0,a.y-2),q);}
-      else if(s<20){x=a.x-3;y=Math.max(0,a.y-2);spark(d,a.x,a.y,(s-15)/5);}
-      else{x=mix(a.x-3,1,between(s,20,26));y=mix(Math.max(0,a.y-2),8,between(s,20,26));}
-      rocket(d,x,y,s<15||s>20,s>20?-1:1);
-    }
-  }
-  // A square sleeve, seen face-on, with a round LP partly pulled to the right.
-  // No narrow vertical spines: the gold centre is the record's visible label.
-  function album(d,x,y,i){d.sprite(x,y,['AAAA.','AAAK.','AAKOK','AAAK.'],{A:colour(i+80),K:C.blue,O:C.gold});}
-  function vinyl(d,n,t,e){
-    const s=(e??0)*28,idx=Math.max(0,n-1),a=vinylSlots[idx],placed=e===null||s>=18;
-    // Featured "now playing" jacket: a larger round black LP makes the small
-    // face-on jackets on the collection wall unambiguous at native resolution.
-    d.rect(8,0,5,5,C.orange);
-    d.sprite(10,0,['.RRR.','RKKKR','RKOKR','RKKKR','.RRR.'],{R:C.teal,K:0,O:C.gold});
-    // Top deck is above the front fascia. The record is a flat 11x5 ellipse;
-    // the tone-arm and stylus sit on that same top plane, never on the fascia.
-    d.line(0,15,51,15,C.brown);d.rect(0,13,18,3,C.blue);
-    d.line(0,13,17,13,C.violet);d.line(0,15,17,15,C.violet);
-    d.line(0,10,3,7,C.violet);d.line(3,7,17,7,C.violet);d.line(17,7,17,13,C.violet);d.line(0,10,0,15,C.violet);
-    d.sprite(2,8,['..BBBBBBB..','.BB.....BB.','BB...O...BB','.BB.....BB.','..BBBBBBB..'],{B:C.teal,O:C.gold});
-    d.p(15,8,C.cream);d.line(15,8,14,10,C.cream);d.line(14,10,11,11,C.cream);d.p(11,12,C.gold);d.p(15,14,C.orange);
-    const spin=e===null?t:s,positions=[[3,10],[4,9],[7,8],[10,9],[11,10],[10,11],[7,12],[4,11]];
-    const [hx,hy]=positions[Math.floor(spin/1.7)%positions.length];d.p(hx,hy,C.cyan);
-    d.p(15,14,0xff0000|Math.round(110+28*Math.sin(t*.65))<<8);
-    d.outline(18,10,3,5,C.blue);d.p(19,12,C.teal);d.p(19,13,Math.floor(t/3)%2?C.teal:C.cyan);
-    vinylSlots.forEach((p,i)=>{if(i<n&&(i!==idx||placed))album(d,p.x,p.y,i);});
-    d.rect(16,3,5,1,C.orange);d.rect(17,1,3,2,C.orange);d.line(18,4,18,6,C.brown);
-    if(e!==null&&n>0){
-      const stand=a.x-2,feetTarget=Math.min(15,a.y+8);let px=stand,bx=a.x,by=a.y,feet=15;
-      if(s<10){px=mix(53,stand,between(s,0,10));bx=px+2;by=8;}
-      else if(s<18){feet=mix(15,feetTarget,between(s,10,15));bx=a.x;by=mix(8,a.y,between(s,10,18));}
-      else if(s<21){feet=mix(feetTarget,15,between(s,18,21));}
-      else if(s>21)px=mix(stand,55,between(s,21,28));
-      if(s>=10&&s<21&&feetTarget<15){d.line(stand-1,feetTarget,stand-1,15,C.brown);d.line(stand+1,feetTarget,stand+1,15,C.brown);for(let y=feetTarget;y<15;y+=2)d.line(stand-1,y,stand+1,y,C.brown);}
-      // A worker on a small stepladder can reach the upper display rows.
-      const dy=feet-15;
-      const actor=Object.assign({},d,{p:(x,y,c)=>d.p(x,y+dy,c),line:(x,y,x1,y1,c)=>d.line(x,y+dy,x1,y1+dy,c)});
-      if(s<18){album(d,bx,by,idx);person(actor,px,s,{x:bx+2,y:by+4-dy});}
-      else person(actor,px,s,s<21?{x:mix(a.x+2,stand+1,between(s,18,21)),y:mix(a.y+4,13+dy,between(s,18,21))-dy}:null);
-    }
-  }
-  function craneState(n,e){
-    const a=makerSlots[Math.max(0,n-1)],s=(e??1)*46;
-    let cart=45.5,hook=2,cargoX=44,cargoY=14,attached=false,placed=e===null,grip=false,supply=false;
-    if(e!==null){
-      supply=s<13;
-      if(s<5){cargoX=mix(54,44,between(s,0,4));}
-      else if(s<11){hook=mix(2,12,between(s,5,11));}
-      else if(s<13){hook=12;grip=true;}
-      else if(s<21){hook=mix(12,2,between(s,13,21));attached=true;grip=true;}
-      else if(s<29){cart=mix(45.5,a.x+1.5,between(s,21,29));attached=true;grip=true;}
-      else if(s<35){cart=a.x+1.5;hook=mix(2,a.y-2,between(s,29,35));attached=true;grip=true;}
-      else if(s<37){cart=a.x+1.5;hook=a.y-2;placed=true;grip=s<36;}
-      else if(s<41){cart=a.x+1.5;hook=mix(a.y-2,2,between(s,37,41));placed=true;}
-      else{cart=mix(a.x+1.5,45.5,between(s,41,46));placed=true;}
-    }
-    cart=Math.round(cart-.5)+.5;hook=Math.round(hook);
-    if(attached){cargoX=cart-1.5;cargoY=hook+2;}
-    const spread=grip?0:1;
-    return {s,cart,hook,cargoX,cargoY,attached,placed,grip,supply,
-      jaws:[cart-2.5-spread,cart+2.5+spread],cables:[cart-.5,cart+.5]};
-  }
-  function brick(d,x,y,i){const c=colour(i+25);d.rect(x,y,4,1,c);d.rect(x+1,y-1,2,1,c);}
-  function maker(d,n,t,e){
-    const st=craneState(n,e),idx=Math.max(0,n-1);
-    d.line(0,15,51,15,C.brown);d.line(8,0,50,0,C.teal);
-    for(const x of [8,50]){d.line(x,1,x,15,C.blue);d.rect(x-1,15,3,1,C.blue);}
-    d.line(8,3,11,0,C.teal);d.line(50,3,47,0,C.teal);
-    d.line(42,15,49,15,C.teal);
-    makerSlots.forEach((p,i)=>{if(i<n&&(i!==idx||st.placed))brick(d,p.x,p.y,i);});
-    if(e!==null&&n>0&&(st.supply||st.attached))brick(d,st.cargoX,st.cargoY,idx);
-    d.rect(st.cart-1.5,1,4,1,C.pink);
-    for(const x of st.cables)d.line(x,2,x,st.hook,C.gold);
-    d.line(st.cart-2.5,st.hook,st.cart+2.5,st.hook,C.cream);
-    for(const x of st.jaws)d.line(x,st.hook+1,x,st.hook+2,C.cream);
-    if(e!==null&&st.s>35&&st.s<39){const a=makerSlots[idx];spark(d,a.x+1,a.y,(st.s-35)/4);}
-  }
-  function weatherState(time,focus){
-    const p=((time%120)+120)%120;
-    if(p<22||p>100)return {visible:false,p,rain:false};
-    const destination=focus===undefined?14:clamp(focus-3,8,40);
-    let x;
-    if(focus===undefined)x=mix(54,-10,(p-22)/78);
-    else if(p<36)x=mix(54,destination,between(p,22,36));
-    else if(p<82)x=focus===undefined?mix(14,32,(p-36)/46):destination;
-    else x=mix(focus===undefined?32:destination,56,between(p,82,100));
-    const storm=p>=64&&p<82,rain=p>=36&&p<92;
-    return {visible:true,p,x,storm,rain};
-  }
-  function weather(d,time,t,focus){
-    const state=weatherState(time,focus),{p,x,storm,rain}=state;
-    if(!state.visible)return state;
-    d.sprite(x,0,['..CCC...','.CCCCC..','CCCCCCCC','.CCCCCC.'],{C:storm?C.blue:C.teal});
-    if(rain){
-      const drops=storm?8:5;
-      for(let i=0;i<drops;i++){
-        const age=(t*5+i*2.13)%12,dx=(hash(i+99)%8),dy=4+age;
-        const rx=focus===undefined?x+dx:mix(x+dx,focus+(dx-4)*.4,(dy-4)/11);
-        if(dy<15){d.p(rx,dy,C.cyan);if(storm&&i%2===0)d.p(rx,dy-1,C.blue);}
-        else d.p(focus===undefined?x+dx:focus+(dx-4)*.4,14,C.cyan);
-      }
-    }
-    const flash=storm&&((p>=65&&p<65.35)||(p>=74&&p<74.35));
-    if(flash)d.sprite(x+3,3,['.Y.','YY.','.YY','Y..'],{Y:C.gold});
-    return state;
-  }
-  function plantTop(list,g){return list.some(a=>a.g===g&&a.stage>=2)?8:list.some(a=>a.g===g)?12:14;}
-  function gardenState(n,e){
-    const s=(e??1)*60,a=gardenSlots[Math.max(0,n-1)],old=gardenSlots.slice(0,Math.max(0,n-1)),all=gardenSlots.slice(0,n);
-    const before=plantTop(old,a.g),after=plantTop(all,a.g),branchStart=a.stage===2?16:12;
-    let weatherTime=8;
-    if(e!==null){
-      if(s<6)weatherTime=10;
-      else if(s<12)weatherTime=mix(22,36,(s-6)/6);
-      else if(s<38)weatherTime=mix(36,82,(s-12)/26);
-      else if(s<46)weatherTime=mix(82,101,(s-38)/8);
-      else weatherTime=105;
-    }
-    return {s,target:a,old,all,before,after,currentTop:e===null?after:mix(before,after,between(s,10,20)),branchStart,
-      branchProgress:e===null?1:between(s,branchStart,26),budProgress:e===null?1:clamp((s-28)/12),
-      flowerDone:e===null||s>=40,weatherTime};
-  }
-  function garden(d,n,t,e,opt){
-    const st=gardenState(n,e),{s,target:a,old,all}=st,idx=Math.max(0,n-1);
-    const wt=opt.weatherTime??(e===null?t:st.weatherTime);
-    const rainClock=opt.weatherTime===undefined?t+(e===null?0:s):opt.weatherTime/3;
-    const atmosphere=weather(d,wt,rainClock,e===null?undefined:a.g*10+3);
-    d.line(0,15,51,15,C.green);d.line(50,4,50,14,C.brown);d.outline(49,1,3,3,C.brown);d.p(50,2,C.gold);d.p(50,0,C.brown);
-    for(let g=0;g<5;g++){
-      const before=plantTop(old,g),after=plantTop(all,g);
-      const top=e!==null&&g===a.g?st.currentTop:after;
-      if(top<14){const x=g*10+3;d.line(x,14,x,top,C.green);if(top<13){d.p(x-1,13,C.lime);d.p(x+1,13,C.lime);}}
-    }
-    all.forEach((p,i)=>{
-      const newFlower=i===idx&&e!==null,root=p.g*10+3;
-      if(!newFlower||s>=st.branchStart){
-        const q=newFlower?st.branchProgress:1;
-        d.line(root,p.y+4,p.x+1,p.y+2,C.green,q);
-        if(newFlower&&q<1){
-          const path=d.points(root,p.y+4,p.x+1,p.y+2),tip=path[Math.max(0,Math.ceil(path.length*q)-1)];d.p(tip[0],tip[1],C.lime);
-        }
-      }
-      const c=[C.gold,C.red,C.violet,C.pink,C.cyan][p.g];
-      if(!newFlower||st.flowerDone)d.sprite(p.x,p.y,['.F.','FOF','.F.'],{F:c,O:C.orange});
-      else if(s>=26){
-        d.p(p.x+1,p.y+1,C.orange);
-        const petals=[[1,0],[0,1],[2,1],[1,2]],k=Math.floor(st.budProgress*4);
-        petals.slice(0,k).forEach(([x,y])=>d.p(p.x+x,p.y+y,c));
-      }
-    });
-    if(e!==null&&s<6&&plantTop(old,a.g)===14)d.p(mix(a.x-6,a.g*10+3,between(s,0,6)),mix(4,14,between(s,0,6)),C.gold);
-    if(e!==null&&s>=40&&s<47)spark(d,a.x+1,a.y,(s-40)/7);
-    if(!atmosphere.rain&&(e===null||s>46)&&t%45<6){const q=t%45,x=12+q*5,y=1+Math.floor(q)%2;
-      d.sprite(x,y,Math.floor(q*2)%2?['C.C','.V.','V.V']:['CC.CC','.CVC.','..V..'],{C:C.cyan,V:C.violet});}
-  }
-  const renderers={city,rail,orbit,vinyl,maker,garden};
-  function frame(id,n=12,t=8,event=null,options={}){
-    if(!renderers[id])throw new Error('Unknown scene '+id);
-    n=clamp(Math.floor(n),0,20);if(event!==null&&event>=1)event=null;
-    const d=make();renderers[id](d,n,t,event,options);
-    if(options.counter!==false){const text=String(n);d.rect(0,0,text.length*4-1,5,0);
-      [...text].forEach((c,j)=>font[c].forEach((row,y)=>[...row].forEach((bit,x)=>{if(bit==='1')d.p(j*4+x,y,C.amber);})));}
-    return d.data;
-  }
-  const phases={
-    city:[[5,'Powrót do domu'],[7,'Otwieranie drzwi'],[11,'Rozsuwanie zasłony'],[18,'Nowe światło w oknie']],
-    rail:[[14,'Kolejarze wpychają wagon'],[18,'Spinanie sprzęgu'],[25,'Wnoszenie paczki'],[28,'Odkładanie na podparcie'],[32,'Kolejarze odchodzą']],
-    orbit:[[5,'Zapłon silnika'],[15,'Lot do nowej gwiazdy'],[20,'Zapalenie gwiazdy'],[26,'Powrót rakiety']],
-    vinyl:[[10,'Kurier niesie nowy album'],[18,'Wejście na drabinkę i zawieszenie okładki'],[21,'Zejście z drabinki'],[28,'Kurier wraca']],
-    maker:[[5,'Podanie klocka na stanowisko'],[11,'Opuszczanie chwytaka'],[13,'Zamknięcie chwytu'],[21,'Podnoszenie klocka'],[29,'Przejazd nad stos'],[35,'Opuszczanie na podparcie'],[37,'Otwarcie chwytu'],[41,'Podnoszenie pustego chwytaka'],[46,'Powrót suwnicy']],
-    garden:[[6,'Ziarenko / przygotowanie rośliny'],[12,'Chmura nad wybraną rośliną'],[20,'Podlewanie — rośnie łodyga lub gałązka'],[26,'Nowa gałązka i zawiązanie pąka'],[40,'Pąk rozwija płatki'],[47,'Kwitnienie — chmura odpływa'],[60,'Nowy kwiat i przejaśnienie']]
-  };
-  function describe(id,seconds,n=1){
-    const seq=id==='rail'&&!railState(n,0).needsWagon?[[13,'Kolejarz wnosi paczkę'],[22,'Umieszczanie paczki na wagonie'],[32,'Kolejarz odchodzi']]:phases[id];
-    return (seq.find(([end])=>seconds<end)||[0,'Spokojny widok'])[1];
-  }
-  function rgb(data){const out=new Uint8Array(W*H*3);data.forEach((c,i)=>{out[i*3]=c>>16&255;out[i*3+1]=c>>8&255;out[i*3+2]=c&255;});return out;}
-  function anchors(id){return slots[id].map(a=>id==='garden'?[a.x+1,a.y+1]:id==='vinyl'?[a.x+3,a.y+2]:[a.x,a.y]);}
-  global.UlanziConcepts={W,H,C,themes,frame,rgb,anchors,slots,describe,craneState,railState,gardenState,weatherState};
-  if(typeof module!=='undefined'&&module.exports)module.exports=global.UlanziConcepts;
+  const ball={x,y,r};physics.balls.push(ball);physics.columns[clamp(Math.round(x),0,W-1)].push(ball);physics.paths.push({path,hit:Math.max(0,hit)});
+ }
+ return physics.balls.slice(0,list.length);
+}
+function jar(d,v,c,t){
+ const list=v.orders,ev=v.event,s=ev?ev.s:99,last=list.length-1,balls=marbles(list,v.count);
+ // Marble colour follows the hour it was paid, light comes from where the sun is now.
+ const stops=[c.hues[3]||c.tiers[0],c.tiers[1],c.tiers[2],c.tiers[0]];
+ const hourColour=sec=>{const p=frac((sec/DAY*24-3)/24)*4,i=Math.floor(p);return blend(stops[i%4],stops[(i+1)%4],ease(p-i));};
+ const sun=clamp((v.now/3600-6)/12,0,1)-.5,glint=Math.floor(t/1.7),glintBall=list.length?hash(glint)%list.length:-1,gq=Math.sin(Math.PI*frac(t/1.7));
+ let first=null;
+ balls.forEach((b,i)=>{
+  let {x,y}=b;
+  if(i===last&&ev){const {path,hit}=physics.paths[i],f=(s-.2)*60;if(f<0)return;const p=path[Math.min(path.length-1,Math.floor(f))];x=p[0];y=p[1];if(f>=hit)first=first??[x,y];}
+  const colour=hourColour(list[i].t);
+  d.ellipse(x,y,b.r,b.r,colour,true);
+  if(b.r>=1.1)d.rect(x+sun*b.r*.9-.5,y-b.r*.45-.5,1,1,blend(colour,c.white,.55));
+  if(i===glintBall&&!ev)d.rect(x+sun*b.r*.9-.5,y-b.r*.45-.5,1,1,blend(colour,c.white,.55+.45*gq));
+ });
+ const landed=!ev||(s-.2)*60>=physics.paths[last].hit;
+ // The settled marble rings once, so even a short drop onto a full pile reads as an arrival.
+ if(ev&&last>=0){const {path}=physics.paths[last],q=(s-.2-path.length/60)/.9;if(q>=0&&q<1){const b=balls[last],r=b.r+.6+2.4*q;d.ellipse(b.x,b.y,r,r,scale(hourColour(list[last].t),.75*(1-q)));}}
+ counter(d,landed?v.count:v.count-1,(x,y)=>balls.some(b=>Math.abs(b.x-x)<=b.r+.5&&Math.abs(b.y-y)<=b.r+.5),c);
+}
+
+/* Tablica: split-flap count tiles and the two latest arrivals. */
+function flapTile(d,x,from,to,q,ink,tile,shine){
+ // The digit runs straight across the split; only the tile behind it has the gap, or a 5 reads as C over J.
+ const hinge=7.5;
+ const body=(rows,y0,y1,k,tint)=>{for(let y=y0;y<=y1;y++){
+  const yy=hinge+(y-hinge)*k,r=y-3,bits=rows&&r>=0&&r<10?rows[r]:'.....';
+  if(y!==8)d.rect(x,yy,7,k,scale(tile,tint));
+  for(let i=0;i<7;i++){const on=i>0&&i<6&&bits[i-1]==='#',f=shine(x+i,y);
+   if(on)d.rect(x+i,yy,1,k,scale(ink,tint));else if(f>0)d.rect(x+i,yy,1,k,scale(blend(tile,ink,.22*f),tint));}}};
+ if(q>=1||from===to){body(to,0,7,1,1);body(to,8,15,1,1);return;}
+ body(to,0,7,1,1);body(from,8,15,1,1);
+ if(q<.5){const k=Math.cos(q*Math.PI);body(from,0,7,k,.55+.45*k);}else{const k=-Math.cos(q*Math.PI);body(to,8,15,k,.55+.45*k);}
+}
+function board(d,v,c,t){
+ const list=v.orders,ev=v.event,s=ev?ev.s:99,n=v.count,tile=scale(c.white,.045),grey=scale(c.white,.2);
+ const digits=k=>String(Math.min(999,Math.max(0,k))).padStart(3,'0'),zeros=k=>{const str=digits(k);let z=0;while(z<2&&str[z]==='0')z++;return z;};
+ const now=digits(n),before=digits(Math.max(0,n-1));
+ // A glint crosses the tiles every ten seconds; after an arrival it follows the flaps.
+ const gs=ev?s-1.4:t%10,bx=-4+30*gs/1.4,shine=(x,y)=>gs<0||gs>1.4?0:Math.max(0,1-Math.abs(x-bx-(y-7)*.4)/1.5);
+ for(let p=0;p<3;p++){
+  const q=ev?part(s,.12*(2-p),.12*(2-p)+.6):1,z=zeros(q<.5?Math.max(0,n-1):n);
+  flapTile(d,p*8,BIG[+before[p]],BIG[+now[p]],q,p<z?grey:c.white,tile,shine);
+ }
+ const rows=[list[list.length-1],list[list.length-2]],old=[list[list.length-2],list[list.length-3]];
+ rows.forEach((o,r)=>{
+  const y=r?9:2,ink=o?r?scale(c.white,.5):c.white:grey,from=old[r]?clock(old[r].t):'--:--',to=o?clock(o.t):'--:--',start=r?.35:.55;
+  d.dot(39,y+1,ink);d.dot(39,y+3,ink);
+  [0,1,3,4].forEach(i=>{const q=ev?part(s,start+.07*i,start+.07*i+.3):1,k=from[i]===to[i]?1:Math.abs(Math.cos(q*Math.PI));
+   glyph(d,q<.5?from[i]:to[i],[31,35,0,41,45][i],y,ink,k);});
+  const mq=ev?part(s,start,start+.3):1,was=old[r]?c.tiers[tier(old[r].v)]:0,mark=o?c.tiers[tier(o.v)]:0,m=mq<.5?scale(was,1-2*mq):scale(mark,2*mq-1);
+  if(m)d.rect(27,y+1.5,2,2,m);
+ });
+}
+
+/* Witraż: multiplicatively weighted Voronoi panes, curved leading between them, sunlight across the glass. */
+const glassCache={key:'',colours:[],labels:null,edges:null};
+const COLUMN_SIN=Array.from({length:W},(_,x)=>Math.sin(x*.23)),COLUMN_COS=Array.from({length:W},(_,x)=>Math.cos(x*.23));
+function seeds(list,plaqueX){return list.map((o,i)=>{const x=1.5+49*frac(.5+i*.7548776662);let y=1.5+13*frac(.5+i*.569840291);if(x>plaqueX-2&&y>8)y-=8;return {x,y,s:.75+.6*weight(o.v)};});}
+const diagram=()=>({labels:new Int16Array(W*H),edges:new Float32Array(W*H),qa:new Float32Array(W*H),qb:new Float32Array(W*H),sa:new Float32Array(W*H),sb:new Float32Array(W*H)});
+function voronoi(points,out){
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){let a=-1,qa=1e9,qb=1e9,sa=1,sb=1;
+  for(let i=0;i<points.length;i++){const p=points[i],q=Math.sqrt((x-p.x)**2+(y-p.y)**2)/p.s;if(q<qa){qb=qa;sb=sa;qa=q;sa=p.s;a=i;}else if(q<qb){qb=q;sb=p.s;}}
+  const k=y*W+x;out.labels[k]=a;out.qa[k]=qa;out.qb[k]=qb;out.sa[k]=sa;out.sb[k]=sb;out.edges[k]=qb<1e9?(qb-qa)*(sa+sb)/2:9;}
+ return out;
+}
+// A growing seed on top of the finished diagram without it. Pixels are visited nearest first and the
+// walk stops where the seed can no longer be first or second, so an arrival stays inside the frame budget.
+function addSeed(base,p,index,out){
+ if(base.seed!==p.x+','+p.y){base.seed=p.x+','+p.y;base.near=Array.from({length:W*H},(_,k)=>k).map(k=>[k,Math.hypot(k%W-p.x,Math.floor(k/W)-p.y)]).sort((a,b)=>a[1]-b[1]);
+  base.reach=0;for(let k=0;k<W*H;k++)if(base.qb[k]<1e9)base.reach=Math.max(base.reach,base.qb[k]);else base.reach=1e9;}
+ out.labels.set(base.labels);out.edges.set(base.edges);
+ for(const [k,dist] of base.near){const q=dist/p.s;if(q>=base.reach)break;let a=base.labels[k],qa=base.qa[k],qb=base.qb[k],sa=base.sa[k],sb=base.sb[k];
+  if(q<qa){qb=qa;sb=sa;qa=q;sa=p.s;a=index;}else if(q<qb){qb=q;sb=p.s;}else continue;
+  out.labels[k]=a;out.edges[k]=qb<1e9?(qb-qa)*(sa+sb)/2:9;}
+ return out;
+}
+function glass(d,v,c,t){
+ const list=v.orders,ev=v.event,s=ev?ev.s:99,n=v.count,w=String(n).length*4-1,plaqueX=51-w-1;
+ const pts=seeds(list,plaqueX),key=plaqueX+'|'+list.map(o=>o.t+':'+o.v).join(',');
+ if(glassCache.key!==key){
+  // Each pane takes a colour none of its neighbours had when it arrived, so old panes never change colour.
+  const keep=glassCache.key.split('|')[0]===String(plaqueX)?glassCache.colours.slice(0,list.length):[];
+  const tmp=diagram();
+  for(let i=keep.length;i<list.length;i++){voronoi(pts.slice(0,i+1),tmp);const near=new Set();
+   for(let y=0;y<H;y++)for(let x=0;x<W;x++){const a=tmp.labels[y*W+x];if(a!==i)continue;for(const [dx,dy] of [[1,0],[0,1],[-1,0],[0,-1]]){const xx=x+dx,yy=y+dy;if(xx>=0&&xx<W&&yy>=0&&yy<H&&tmp.labels[yy*W+xx]!==i)near.add(keep[tmp.labels[yy*W+xx]]);}}
+   const start=hash(i+401)%5;let pickC=start;for(let k=0;k<5;k++){const cand=(start+k)%5;if(!near.has(cand)){pickC=cand;break;}}keep.push(pickC);}
+  Object.assign(glassCache,voronoi(pts,diagram()),{key,colours:keep,before:list.length?voronoi(pts.slice(0,-1),diagram()):null,live:diagram(),frameAt:-1});
+ }
+ let field=glassCache,grow=1;const last=list.length-1,frameKey=key+'|'+n+(ev?'|arrival':''),at=ev?s:t;
+ // The light drifts slowly and a pane grows over two seconds: relit 20 (30 while growing) times a second.
+ if(glassCache.frame&&glassCache.frameKey===frameKey&&glassCache.framePalette===c&&at>=glassCache.frameAt&&at-glassCache.frameAt<(ev?1/30:.05))return glassCache.frame;
+ if(ev&&last>=0&&s<2.4){grow=part(s,.2,2.2);field=addSeed(glassCache.before,{...pts[last],s:Math.max(.04,pts[last].s*grow)},last,glassCache.live);}
+ // Whole pixels only, so the glass is written straight into the frame instead of through the rasterizer.
+ const hour=v.now/3600,day=hour>6.5&&hour<19.5,sunX=-6+64*clamp((hour-6.5)/13),base=day?.34:.32,out=new Uint32Array(W*H);
+ const column=Array.from({length:W},(_,x)=>base+(day?.5*Math.exp(-(((x-sunX)/15)**2)):.12)),phase=Array.from({length:H},(_,y)=>Math.sin(y*.5+t*.17)*1.4-t*.31);
+ // Drifting cloud light sin(x·.23 + phase(y)), expanded so each pixel costs two multiplications.
+ const rs=phase.map(Math.sin),rc=phase.map(Math.cos),fresh=ev&&last>=0?blend(c.white,c.hues[glassCache.colours[last]??0],part(s,.6,2.8)):0,empty=scale(c.white,.1);
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+  if(x>=plaqueX-1&&y>=9)continue;
+  const k=y*W+x,e=field.edges[k];if(e<.4)continue;
+  const i=field.labels[k],pane=i<0?empty:i===last&&ev?fresh:c.hues[glassCache.colours[i]??0];
+  const q=Math.min(1,column[x]*(.86+.14*(COLUMN_SIN[x]*rc[y]+COLUMN_COS[x]*rs[y])))*(e<1.2?(e-.4)/.8:1);
+  out[k]=((R(pane)*q)<<16)|((G(pane)*q)<<8)|(B(pane)*q);
+ }
+ Object.assign(glassCache,{frame:out,frameAt:at,frameKey,framePalette:c});
+ const shown=String(ev&&s<1?Math.max(0,n-1):n);
+ [...shown].forEach((ch,j)=>{const bits=SMALL[ch];for(let r=0;r<5;r++)for(let i=0;i<3;i++)if(bits[r*3+i]==='1')out[(10+r)*W+plaqueX+1+j*4+i]=c.white;});
+ return out;
+}
+
+const renderers={hours,sky,jar,board,glass};
+/* view: {orders:[{t,v}] paid so far (t = seconds since local midnight, v = value or null), count, now, event:{s}|null} */
+function frame(id,view,theme={},t=0){
+ if(!renderers[id])throw Error('Unknown scene '+id);
+ const d=surface(),direct=renderers[id](d,view,palette(theme),t);return direct||d.finish();
+}
+function rgb(data){const out=new Uint8Array(W*H*3);for(let i=0;i<data.length;i++){out[i*3]=data[i]>>>16&255;out[i*3+1]=data[i]>>>8&255;out[i*3+2]=data[i]&255;}return out;}
+g.UlanziOrders={W,H,DAY,scenes,frame,rgb,palette,weight};
+if(typeof module!=='undefined'&&module.exports)module.exports=g.UlanziOrders;
 })(typeof globalThis!=='undefined'?globalThis:this);

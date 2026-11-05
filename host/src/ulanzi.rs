@@ -42,7 +42,7 @@ pub enum Command {
     Clock,
     /// Select a locally rendered paid-order scene.
     Scene {
-        #[arg(value_parser = ["city", "rail", "orbit", "vinyl", "maker", "garden"])]
+        #[arg(value_parser = ["hours", "sky", "jar", "board", "glass"])]
         name: String,
     },
     /// Replay the current scene animation without changing the real paid count.
@@ -646,14 +646,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Garden { bloom } => {
             let mut config = load()?;
             if config.stories {
-                if bloom.is_some() {
-                    bail!("real daily payments are owned by the BaseLinker bridge; use replay for a demo");
-                }
-                Device::open(&config)?
-                    .stories(Method::POST, "/scene", Some(json!({"scene":"garden"})))
-                    .await?;
-                println!("Garden scene is showing; real daily count preserved.");
-                return Ok(());
+                bail!("the scene engine owns the panel; pick an order scene with `themesync ulanzi scene hours|sky|jar|board|glass`");
             }
             if let Some(event) = bloom {
                 if !config.garden.bloom(&event)? {

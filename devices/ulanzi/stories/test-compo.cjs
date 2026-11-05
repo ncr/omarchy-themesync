@@ -16,7 +16,7 @@ b.req('POST','/input',{control:'right',event:'click'});assert.equal(b.req('GET',
 let restored=boot(b.state());assert.equal(restored.req('GET','/status',{}).mode,'compo');assert.equal(restored.req('GET','/status',{}).count,12);
 for(const mode of ['stories','clock','compo']){restored.req('POST','/input',{control:'middle',event:'click'});assert.equal(restored.req('GET','/status',{}).mode,mode);}
 restored.req('PUT','/state',{day:'2026-11-03',count:13,revision:2,animate:true});assert(restored.req('GET','/status',{}).animation);restored.step(61);assert.equal(restored.req('GET','/status',{}).mode,'compo');assert.equal(restored.req('GET','/status',{}).animation,null);assert.equal(restored.req('GET','/status',{}).count,13);
-restored.req('POST','/scene',{scene:'city'});assert.equal(restored.req('GET','/status',{}).mode,'stories');assert.throws(()=>restored.req('POST','/demo',{id:'missing'}));
+restored.req('POST','/scene',{scene:'hours'});assert.equal(restored.req('GET','/status',{}).mode,'stories');assert.throws(()=>restored.req('POST','/demo',{id:'missing'}));
 for(const id of ['cube','orbit','silk','gears']){
  const smooth=demo.frame(id,3.137),hard=demo.frame(id,3.137,{}, {antialias:false});
  assert.notDeepEqual(smooth,hard,id+': AA must alter real 52×16 pixels');

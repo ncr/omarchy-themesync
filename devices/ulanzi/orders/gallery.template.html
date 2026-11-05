@@ -1,0 +1,52 @@
+<!doctype html><html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Zamówienia dnia</title>
+<style>
+:root{--bg:#f4f2ee;--fg:#1d1c1a;--muted:#6d6a64;--line:#dedad3;--panel:#0b0b0c;--chip:#fff}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121212;--fg:#ecebe8;--muted:#9a978f;--line:#2b2a28;--panel:#000;--chip:#1c1c1c}}
+:root[data-theme="dark"]{--bg:#121212;--fg:#ecebe8;--muted:#9a978f;--line:#2b2a28;--panel:#000;--chip:#1c1c1c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:32px 16px 48px}
+h1{font-size:28px;margin:0 0 4px;letter-spacing:-.01em}p.lead{margin:0 0 20px;color:var(--muted)}
+.bar{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;padding:12px 0 20px;border-bottom:1px solid var(--line);margin-bottom:8px}
+label{color:var(--muted);font-size:14px;display:flex;gap:8px;align-items:center}
+input[type=range]{width:160px}select,button{font:inherit;color:var(--fg);background:var(--chip);border:1px solid var(--line);border-radius:8px;padding:5px 10px}
+button.primary{background:var(--fg);color:var(--bg);border-color:var(--fg);cursor:pointer}
+output{font-variant-numeric:tabular-nums;color:var(--fg);min-width:2ch;display:inline-block}
+section{display:grid;grid-template-columns:200px 1fr;gap:16px;align-items:center;padding:18px 0;border-bottom:1px solid var(--line)}
+section h2{margin:0;font-size:18px}section .id{font:12px ui-monospace,monospace;color:var(--muted)}section p{margin:4px 0 0;color:var(--muted);font-size:14px}
+canvas{width:100%;aspect-ratio:52/16;background:var(--panel);border-radius:10px;display:block;image-rendering:pixelated}
+@media (max-width:640px){section{grid-template-columns:1fr}}
+footer{color:var(--muted);font-size:13px;margin-top:20px}
+</style></head><body><main>
+<h1>Zamówienia dnia</h1>
+<p class="lead">Pięć scen dzisiejszych opłaconych zamówień na Ulanzi TC002, 52 × 16 diod. Ten sam kod co na zegarze, dzień symulowany.</p>
+<div class="bar">
+<label>Zamówień <input id="n" type="range" min="0" max="24" value="9"><output id="nv"></output></label>
+<label>Godzina <input id="h" type="range" min="0" max="23.9" step="0.1" value="15"><output id="hv"></output></label>
+<label>Motyw <select id="theme"><option value="bloom">p-bloom</option><option value="jade">osaka-jade</option><option value="gruv">gruvbox</option><option value="nord">nord</option></select></label>
+<button class="primary" id="arrive">Nowe zamówienie</button>
+</div>
+<div id="list"></div>
+<footer>Koralik, gwiazda, kulka, klapka i szybka to zawsze jedno zamówienie: jego godzina opłacenia i wartość. Na zegarze nowe zamówienie odtwarza przybycie; pokrętło powtarza ostatnie, − / + zmienia scenę.</footer>
+</main>
+<script>
+/* ORDERS_SOURCE */
+</script>
+<script>
+const O=UlanziOrders,themes={bloom:{accent:'4cc9ff',secondary:'b97aff'},jade:{accent:'509475',secondary:'d2689c',colors:{foreground:'c1c497',yellow:'459451',orange:'a2734b',cyan:'2dd5b7',red:'ff5345',magenta:'d2689c'}},
+ gruv:{accent:'d79921',secondary:'b16286',colors:{foreground:'ebdbb2',red:'cc241d',green:'98971a',yellow:'d79921',blue:'458588',cyan:'689d6a',orange:'d65d0e'}},
+ nord:{accent:'88c0d0',secondary:'b48ead',colors:{foreground:'d8dee9',red:'bf616a',green:'a3be8c',yellow:'ebcb8b',blue:'81a1c1',orange:'d08770'}}};
+const $=id=>document.getElementById(id),list=$('list'),views=[];
+// A plausible shop day: quiet night, busier late morning and evening; values from 5 to 400 zł.
+function day(n,now){const start=Math.min(6.5*3600,now*.3),out=[];for(let i=0;i<n;i++){const u=(i*0.6180339887+.31)%1;out.push({t:Math.round(start+(now-start)*(u<.5?u*1.25:.625+(u-.5)*.75)),v:Math.round(5*Math.pow(80,(i*0.3819660113+.17)%1))});}return out.sort((a,b)=>a.t-b.t);}
+for(const s of O.scenes){const el=document.createElement('section');el.innerHTML=`<div><h2>${s.name}</h2><span class="id">${s.id}</span><p>${s.description}</p></div><canvas width="520" height="160"></canvas>`;list.append(el);views.push({id:s.id,ctx:el.querySelector('canvas').getContext('2d'),duration:s.duration});}
+let arrival=null;$('arrive').onclick=()=>{arrival=performance.now();if(+$('n').value<24){$('n').value=+$('n').value+1;}sync();};
+function sync(){$('nv').textContent=$('n').value;const h=+$('h').value;$('hv').textContent=String(Math.floor(h)).padStart(2,'0')+':'+String(Math.floor(h%1*60)).padStart(2,'0');}
+['n','h'].forEach(id=>$(id).oninput=()=>{arrival=null;sync();});sync();
+function draw(ctx,f){ctx.fillStyle='#000';ctx.fillRect(0,0,520,160);for(let i=0;i<f.length;i++){const c=f[i];if(!c)continue;ctx.fillStyle='#'+c.toString(16).padStart(6,'0');ctx.beginPath();ctx.arc((i%52)*10+5,Math.floor(i/52)*10+5,4.2,0,7);ctx.fill();}}
+function frame(now){const n=+$('n').value,orders=day(n,+$('h').value*3600),theme=themes[$('theme').value],t=now/1000;
+ // The newest order is always the latest of the day, so it lands where a real arrival would.
+ if(arrival&&orders.length)orders[orders.length-1].t=Math.max(orders.length>1?orders[orders.length-2].t:0,Math.round(+$('h').value*3600));
+ for(const v of views){const s=arrival?(now-arrival)/1000:null,ev=s!==null&&s<v.duration&&n?{s}:null;draw(v.ctx,O.frame(v.id,{orders,count:n,now:+$('h').value*3600,event:ev},theme,t));}
+ requestAnimationFrame(frame);}
+requestAnimationFrame(frame);
+</script></body></html>

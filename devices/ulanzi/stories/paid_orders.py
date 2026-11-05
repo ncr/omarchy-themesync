@@ -112,7 +112,14 @@ class Bridge:
         cutoff=start-100*86400
         self.state['observed']={k:v for k,v in self.state['observed'].items() if v.get('created',start)>=cutoff or k in self.state['paid']}
         atomic(self.path,self.state)
-        return {'day':self.state['day'],'count':len(self.state['paid']),'revision':self.state['revision'],'asof':self.state['last_success'],'animate':not bootstrap}
+        return {'day':self.state['day'],'count':len(self.state['paid']),'orders':self.orders(),'revision':self.state['revision'],'asof':self.state['last_success'],'animate':not bootstrap}
+    def orders(self):
+        # Only the local time of day it was paid and its value in whole złoty; the clock keeps the latest 100.
+        out=[]
+        for key,paid_at in sorted(self.state['paid'].items(),key=lambda kv:(kv[1],kv[0])):
+            local=dt.datetime.fromtimestamp(paid_at,TZ);total=self.state['observed'].get(key,{}).get('total')
+            out.append([local.hour*3600+local.minute*60+local.second,int(D(total).quantize(D(1))) if total is not None else None])
+        return out[-100:]
     def device(self,path,data=None,method=None):
         token_path=Path(self.config['ulanzi_token_file']);token=next(l[8:] for l in token_path.read_text().splitlines() if l.startswith('control='))
         headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}

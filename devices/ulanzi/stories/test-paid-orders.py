@@ -30,4 +30,10 @@ class Tests(unittest.TestCase):
  def test_previous_day_already_full_does_not_count_topup_today(self):
   h=[{'paid_before':0,'paid_after':10,'total_price':10,'date':1},{'paid_before':10,'paid_after':20,'total_price':20,'date':101}]
   self.assertEqual(p.first_full_payment(h),1)
+ def test_orders_are_local_time_and_value_only(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   b=p.Bridge({'state_file':str(Path(tmp)/'state.json')},object())
+   at=lambda h,m:int(dt.datetime(2026,10,25,h,m,tzinfo=p.TZ).timestamp())
+   b.state['paid']={'7':at(14,30),'3':at(1,5)};b.state['observed']={'7':{'total':'63.99'},'3':{'total':'208.23'}}
+   self.assertEqual(b.orders(),[[3900,208],[52200,64]])
 if __name__=='__main__':unittest.main()

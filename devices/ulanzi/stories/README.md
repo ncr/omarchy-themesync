@@ -1,13 +1,18 @@
 # Ulanzi paid-order scenes
 
-Six scenes run **on the TC002 itself**, at native 52×16 RGB888, a 60-fps output cadence (order-world movement remains deliberately slow):
-`city`, `rail`, `orbit`, `vinyl`, `maker`, `garden`. `renderer.js` is the same v5 source as the approved browser preview. QuickJS executes it locally; the host never streams animation frames over Wi-Fi.
+Five scenes of **today's paid orders** run **on the TC002 itself**, at native 52×16 RGB888 and 60 fps:
 
-The desktop accent recolours structural elements and the counter in every scene.
-The secondary colour accents machinery and decorative elements. Saturated, quantized
-channels keep the black background unlit and avoid low-channel LED haze; garden
-foliage, rain and flower colours retain their meaning. Palette changes preserve the
-count, selected scene and brightness, and persist across engine restarts.
+| id | name | what it shows |
+|---|---|---|
+| `hours` | Liczydło | 24 hour rods; each order is a bead in the hour it was paid, coloured by value |
+| `sky` | Gwiazdozbiór | each order a star: across = time of day, up = value; lines join them in order |
+| `jar` | Słoik | marbles fall and settle into a mound (simulated); size = value, colour = time of day |
+| `board` | Tablica | split-flap count and the times of the two latest orders |
+| `glass` | Witraż | weighted-Voronoi stained glass; a bigger order gets a bigger pane, sunlight follows the time of day |
+
+Each new order plays an arrival (falling bead, comet, dropping marble, flapping tiles, a pane growing in). They are designed for up to about 20 orders a day; above that they stay correct and simply get denser. The scenes see only the local time each order was paid and its value in whole złoty. Colours come from the desktop theme: the accent and secondary colour first, then the next theme colour with a clearly different hue, pushed to full LED brightness. `renderer.js` renders the same frames in Node (tests, preview) as QuickJS on the clock, through the shared 4×4 antialiasing rasterizer.
+
+Browser preview: `devices/ulanzi/orders/index.html` plays all five on a simulated day (order count, time of day, theme, a "new order" button). Rebuild it with `python3 devices/ulanzi/orders/build.py`.
 
 Controls:
 
@@ -23,11 +28,11 @@ Host CLI: `themesync ulanzi scene rail`, `themesync ulanzi clock`, `themesync ul
 
 `paid_orders.py` is a read-only bridge. Its only allowed BaseLinker methods are `getOrders`, `getJournalList`, `getOrderPaymentsHistory`. TLS verifies the API connection. Use a read-only BaseLinker token stored in a mode-600 file outside the repository. No customer names, addresses, contacts or product details are stored or sent to the clock.
 
-The day is **Europe/Warsaw**, including DST. Payment history with `show_full_history=true` identifies the first transition from partial/unpaid to fully paid. Partial payments, price reductions and repeated notifications do not add an order. The initial state is applied quietly. Later increases queue complete scene-specific animations. Deduplication survives service/device restarts. At midnight the clock resets independently of host connectivity. The exact number stays correct above 20; worlds retain 20 objects, with an overflow celebration for subsequent orders.
+The day is **Europe/Warsaw**, including DST. Payment history with `show_full_history=true` identifies the first transition from partial/unpaid to fully paid. Partial payments, price reductions and repeated notifications do not add an order. The initial state is applied quietly. Later increases queue complete scene-specific animations. Deduplication survives service/device restarts. At midnight the clock resets independently of host connectivity. The exact number stays correct at any count.
 
 Bootstrap discovers orders from the last 90 days whose creation/current-status change occurred today, plus **all active statuses regardless of order age**. This covers today's incoming orders and older waiting orders that pay today. A historical payment today on a terminal order older than 90 days with no status change today is outside that bootstrap scan. The event journal covers future events once enabled. Enable the event journal in the BaseLinker API settings; activation can take **up to 24 hours**. Until then, payment-history polling remains active. Never interpret an empty journal as zero sales.
 
-Normal polling is every 30 seconds, with six active statuses; the wider 90-day/all-active reconciliation runs every five minutes. API calls are paced at no more than 24/minute for this bridge, and payment histories are cached. Transient API/device errors retry with backoff and preserve the last known count. Only the aggregate `{day,count,revision,asof}` is sent to Ulanzi. New events are not simulated in production.
+Normal polling is every 30 seconds, with six active statuses; the wider 90-day/all-active reconciliation runs every five minutes. API calls are paced at no more than 24/minute for this bridge, and payment histories are cached. Transient API/device errors retry with backoff and preserve the last known count. Only `{day,count,orders,revision,asof}` is sent to Ulanzi, where `orders` is `[seconds since local midnight, whole złoty]` per order, oldest first, at most the latest 100. A bridge that sends only the count still works: the clock places new orders at the moment they arrived. New events are not simulated in production.
 
 User service: `themesync-paid-orders.service`, enabled under `default.target`. Configuration: `~/.config/themesync/paid-orders.json`; private state: `~/.local/state/themesync/paid-orders.json`; public compact health: `~/.local/state/themesync/paid-orders-status.json`.
 
@@ -55,13 +60,13 @@ Build: `python3 build.py --quickjs /path/to/quickjs-2026-06-04 --zig /path/to/zi
 
 Verified:
 
-- `node test-scene-palettes.cjs`: visible pixel changes in all six scenes for counts 0/12/20, preserved silhouettes and black background, persistence, no low-channel haze or repeated flash writes.
-- `node test-device.cjs`: all scenes, controls, baseline without replay, queued burst, dedup, restart, clock return, midnight, counts >20.
+- `node test-orders.cjs`: all five scenes for 0/1/5/20/100 orders: deterministic frames, theme changes the picture, every arrival animates, idle never freezes.
+- `node test-device.cjs`: scenes, controls, queued burst, dedup, restart, clock return, midnight, order validation, count-only bridge, the 100-order state within storyd's 8 KiB.
 - `python3 test-paid-orders.py`: exact decimal totals, full/partial transitions, delayed history retry, cached/restarted dedup, first full-payment date, 23/25-hour DST days, no PII retention.
 - 126 static scene states and 4600 object transport states in the shared v5 scene verifier.
 - 51 native API parser tests pass, including the new stream opt-in regression; ARM runtime builds.
 - All 51 ThemeSync host tests and release Clippy pass.
-- All six actual device screen RGB buffers matched the engine buffers exactly, 832/832 pixels each; captures are in the deployment output `live-*-52x16.png`.
+- On the TC002 (2026-11-05) all five scenes ran at 60 fps with zero frame failures; arrivals were checked through the desk camera, including a real order that arrived over the count-only bridge.
 - Evdev injection through the real device kernel confirmed −/+, clock toggle, both encoder directions and encoder click replay; the real count remained unchanged and the previous brightness was restored.
 
 Baseline validation of the broader upstream native suite reported 692/694 passing: an unused-byte comparison in the log-message roundtrip fixture fails and the TLS-worker test aborts in Zig's ML-KEM stack. Neither is used by this plaintext local frame path; no claim of a wholly green native suite is made.
@@ -100,7 +105,7 @@ reports measured `fps`, `target_fps`, `render_ms`, and `antialias_samples` in `/
 themesync ulanzi demo                 # automatic 28-entry show (~7 min 56 s)
 themesync ulanzi demo drive --manual  # loop one animated entry
 themesync ulanzi demo --list          # names, IDs, descriptions and durations
-themesync ulanzi scene garden        # leave the show for the order world
+themesync ulanzi scene hours         # leave the show for the order scenes
 ```
 
 Three short loops use scene colours for water, hot steel and paper, with accents
