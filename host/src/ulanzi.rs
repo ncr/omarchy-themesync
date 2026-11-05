@@ -450,7 +450,8 @@ async fn sync(config: &Config, source: &SourcePalette, assets: bool) -> Result<V
         let scene = device
             .stories(Method::PUT, "/palette", Some(story_palette(source)?))
             .await?;
-        if scene["palette_rendering"] != "contrast-accents-v1" {
+        // The scene engine states that it draws with the desktop palette it was just sent.
+        if scene["palette_rendering"] != "theme-palette-v2" {
             bail!("Ulanzi scene engine does not render desktop palettes; update device.js");
         }
         return Ok(

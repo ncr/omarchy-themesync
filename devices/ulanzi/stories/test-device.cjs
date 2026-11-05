@@ -27,7 +27,7 @@ let plain=boot();plain.clock(15*3600+120);plain.req('PUT','/state',{day:'2026-11
 // Replay with nothing paid today does nothing; the full 100-order state still fits in storyd's 8 KiB.
 let empty=boot();empty.req('POST','/replay',{});assert.equal(empty.req('GET','/status',{}).animation,null);
 let full=boot();full.req('PUT','/state',{day:'2026-11-03',count:450,orders:Array.from({length:100},(_,i)=>[i*840,999999]),revision:1});for(const id of ids){full.req('POST','/scene',{scene:id});assert.equal(full.frame().length,2496);}
-let themed=boot();themed.req('PUT','/palette',{accent:'00ffff',name:'test',secondary:'ff0080'});let writes=themed.saves();themed.req('PUT','/palette',{name:'test',secondary:'ff0080',accent:'00ffff'});assert.equal(themed.saves(),writes);
+let themed=boot();assert.equal(themed.req('PUT','/palette',{accent:'00ffff',name:'test',secondary:'ff0080'}).palette_rendering,'theme-palette-v2','the host checks this before it reports the clock connected');let writes=themed.saves();themed.req('PUT','/palette',{name:'test',secondary:'ff0080',accent:'00ffff'});assert.equal(themed.saves(),writes);
 // Arrival sounds: once per arrival at the scene's cue, silent at night unless replayed by hand, mutable.
 function sounding(saved=null){let t=0,state=saved,wall=15*3600;const played=[];
  const FakeDate=function(){const s=wall;return {getHours:()=>Math.floor(s/3600),getMinutes:()=>Math.floor(s/60)%60,getSeconds:()=>Math.floor(s)%60,getMilliseconds:()=>0};};
