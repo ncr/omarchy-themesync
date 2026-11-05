@@ -30,7 +30,7 @@ static JSValue js_raster_sample(JSContext*c,JSValueConst self,int n,JSValueConst
 static JSValue js_raster_finish(JSContext*c,JSValueConst self,int n,JSValueConst*a){(void)self;(void)n;(void)a;raster_finish();JSValue buffer=JS_NewArrayBufferCopy(c,(uint8_t*)raster_out,sizeof(raster_out));if(JS_IsException(buffer))return buffer;JSValue args[]={buffer,JS_UNDEFINED,JS_UNDEFINED};JSValue result=JS_NewTypedArray(c,3,args,JS_TYPED_ARRAY_UINT32);JS_FreeValue(c,buffer);return result;}
 
 static JSContext *ctx;
-static char token[65], statepath[512];
+static char token[65], sound_token[65], statepath[512];
 static unsigned char lastframe[2496];
 static int running=1, dry_run=0;
 static unsigned long frames=0, failures=0;
@@ -42,19 +42,20 @@ static double mono(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);ret
 static void stop(int sig){(void)sig;running=0;}
 static int writeall(int fd,const void *ptr,size_t n){const char *p=ptr;while(n){ssize_t k=send(fd,p,n,MSG_NOSIGNAL);if(k<0&&errno==EINTR)continue;if(k<=0)return -1;p+=k;n-=k;}return 0;}
 static int socktime(int fd,int ms){struct timeval t={ms/1000,(ms%1000)*1000};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&t,sizeof(t));setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&t,sizeof(t));return fd;}
-static int api(const char *method,const char *path,const void *body,size_t len){
+static int api_as(const char *bearer,const char *method,const char *path,const void *body,size_t len){
  if(dry_run)return 1;
  int fd=socktime(socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0),600);if(fd<0)return 0;
  int no_delay=1;setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&no_delay,sizeof(no_delay));
  struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(80)};inet_pton(AF_INET,"127.0.0.1",&a.sin_addr);
  if(connect(fd,(void*)&a,sizeof(a))){close(fd);return 0;}
- char h[1024];int n=snprintf(h,sizeof(h),"%s /api/v1%s HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",method,path,token,!strncmp(path,"/frame?",7)?"application/octet-stream":"application/json",len);
+ char h[1024];int n=snprintf(h,sizeof(h),"%s /api/v1%s HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",method,path,bearer,!strncmp(path,"/frame?",7)?"application/octet-stream":"application/json",len);
  int ok=writeall(fd,h,n)==0&&(!len||writeall(fd,body,len)==0);char response[2048];int k=ok?recv(fd,response,sizeof(response)-1,0):-1;if(k>0)response[k]=0;
  ok=k>12&&!strncmp(response,"HTTP/1.1 200",12);
  if(k>0){size_t z=strcspn(response,"\r\n");if(z>79)z=79;memcpy(last_api_status,response,z);last_api_status[z]=0;}
  if(!ok&&failures<4&&k>0)fprintf(stderr,"API response: %.*s\n",k,response);
  close(fd);return ok;
 }
+static int api(const char *method,const char *path,const void *body,size_t len){return api_as(token,method,path,body,len);}
 static void error(void){JSValue e=JS_GetException(ctx);const char*s=JS_ToCString(ctx,e);fprintf(stderr,"story JS: %s\n",s?s:"exception");JS_FreeCString(ctx,s);JSValue stack=JS_GetPropertyStr(ctx,e,"stack");s=JS_ToCString(ctx,stack);if(s)fprintf(stderr,"%s\n",s);JS_FreeCString(ctx,s);JS_FreeValue(ctx,stack);JS_FreeValue(ctx,e);}
 static JSValue call(const char *name,int n,JSValue *args){JSValue global=JS_GetGlobalObject(ctx),f=JS_GetPropertyStr(ctx,global,name),v=JS_Call(ctx,f,global,n,args);JS_FreeValue(ctx,f);JS_FreeValue(ctx,global);return v;}
 static JSValue js_time(JSContext*c,JSValueConst self,int n,JSValueConst*args){(void)self;(void)n;(void)args;return JS_NewFloat64(c,mono()-started);}
@@ -62,6 +63,10 @@ static JSValue js_day(JSContext*c,JSValueConst self,int n,JSValueConst*args){(vo
 static JSValue js_save(JSContext*c,JSValueConst self,int n,JSValueConst*args){(void)self;if(n!=1)return JS_FALSE;size_t len;const char*s=JS_ToCStringLen(c,&len,args[0]);if(!s||len>8192){JS_FreeCString(c,s);return JS_FALSE;}char tmp[550];snprintf(tmp,sizeof(tmp),"%s.new",statepath);FILE*f=fopen(tmp,"w");int ok=0;if(f){chmod(tmp,0600);ok=fwrite(s,1,len,f)==len&&fflush(f)==0;int syncok=fsync(fileno(f))==0;int closeok=fclose(f)==0;ok=ok&&syncok&&closeok;if(ok)ok=rename(tmp,statepath)==0;}JS_FreeCString(c,s);return JS_NewBool(c,ok);}
 static JSValue js_load(JSContext*c,JSValueConst self,int n,JSValueConst*args){(void)self;(void)n;(void)args;char b[8193];FILE*f=fopen(statepath,"r");if(!f)return JS_NULL;size_t k=fread(b,1,8192,f);b[k]=0;fclose(f);return JS_ParseJSON(c,b,k,"state.json");}
 static JSValue js_api(JSContext*c,JSValueConst self,int n,JSValueConst*args){(void)self;if(n!=3)return JS_FALSE;const char*m=JS_ToCString(c,args[0]),*p=JS_ToCString(c,args[1]),*b=JS_ToCString(c,args[2]);int ok=m&&p&&b&&api(m,p,b,strlen(b));JS_FreeCString(c,m);JS_FreeCString(c,p);JS_FreeCString(c,b);return JS_NewBool(c,ok);}
+/* Arrival sounds use their own token, which holds only the runtime's sound scope (sound.token beside state.json). */
+static JSValue js_sound(JSContext*c,JSValueConst self,int n,JSValueConst*args){(void)self;if(n!=2||!sound_token[0])return JS_FALSE;const char*name=JS_ToCString(c,args[0]);int volume=0;JS_ToInt32(c,&volume,args[1]);int ok=0;
+ if(name&&strlen(name)<=32&&strspn(name,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")==strlen(name)&&volume>=1&&volume<=100){char body[96];int k=snprintf(body,sizeof(body),"{\"name\":\"%s\",\"volume\":%d}",name,volume);ok=api_as(sound_token,"POST","/sound",body,k);}
+ JS_FreeCString(c,name);return JS_NewBool(c,ok);}
 static JSValue js_info(JSContext*c,JSValueConst self,int n,JSValueConst*args){(void)self;(void)n;(void)args;JSValue v=JS_NewObject(c);JS_SetPropertyStr(c,v,"target_fps",JS_NewFloat64(c,TARGET_FPS));JS_SetPropertyStr(c,v,"fps",JS_NewFloat64(c,measured_fps));JS_SetPropertyStr(c,v,"render_ms",JS_NewFloat64(c,render_ms));JS_SetPropertyStr(c,v,"antialias_samples",JS_NewInt32(c,16));JS_SetPropertyStr(c,v,"frames",JS_NewInt64(c,frames));JS_SetPropertyStr(c,v,"last_api_status",JS_NewString(c,last_api_status));JS_SetPropertyStr(c,v,"frame_failures",JS_NewInt64(c,failures));JS_SetPropertyStr(c,v,"uptime_s",JS_NewFloat64(c,mono()-started));return v;}
 static int evalfile(const char *path){FILE*f=fopen(path,"r");if(!f){perror(path);return 0;}fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);if(n<0||n>200000){fclose(f);return 0;}char*b=malloc(n+1);if(!b){fclose(f);return 0;}size_t k=fread(b,1,n,f);fclose(f);b[k]=0;JSValue v=JS_Eval(ctx,b,k,path,JS_EVAL_TYPE_GLOBAL);free(b);int ok=!JS_IsException(v);if(!ok)error();JS_FreeValue(ctx,v);return ok;}
 static void control(const char *name,const char *edge){JSValue a[]={JS_NewString(ctx,name),JS_NewString(ctx,edge)};JSValue v=call("storyControl",2,a);if(JS_IsException(v))error();for(int i=0;i<2;i++)JS_FreeValue(ctx,a[i]);JS_FreeValue(ctx,v);}
@@ -90,16 +95,17 @@ int main(int argc,char**argv){
  setenv("TZ","CET-1CEST,M3.5.0,M10.5.0/3",1);tzset();umask(0077);signal(SIGTERM,stop);signal(SIGINT,stop);signal(SIGPIPE,SIG_IGN);started=mono();
  snprintf(statepath,sizeof(statepath),"%s",argv[4]);char lock[550];snprintf(lock,sizeof(lock),"%s.lock",statepath);int lockfd=open(lock,O_CREAT|O_RDWR|O_CLOEXEC,0600);if(lockfd<0||flock(lockfd,LOCK_EX|LOCK_NB)){fprintf(stderr,"storyd already running or state path unavailable\n");return 1;}
  FILE*f=fopen(argv[3],"r");if(!f){perror("tokens");return 1;}char line[256];while(fgets(line,sizeof(line),f))if(!strncmp(line,"control=",8)&&strlen(line+8)>=64){memcpy(token,line+8,64);token[64]=0;}fclose(f);if(strlen(token)!=64){fprintf(stderr,"missing control token\n");return 1;}
+ {char sp[560];snprintf(sp,sizeof(sp),"%s",statepath);char *cut=strrchr(sp,'/');snprintf(cut?cut+1:sp,sizeof(sp)-(cut?cut+1-sp:0),"sound.token");FILE*sf=fopen(sp,"r");if(sf){char l[128]={0};if(fgets(l,sizeof(l),sf)){l[strcspn(l,"\r\n")]=0;if(strlen(l)==64)memcpy(sound_token,l,65);}fclose(sf);}}
  dry_run=argc>6&&!strcmp(argv[6],"--dry-run");int port=argc>5?atoi(argv[5]):8878;if(port<1024||port>65535)return 2;
  JSRuntime *rt=JS_NewRuntime();JS_SetMemoryLimit(rt,3*1024*1024);JS_SetMaxStackSize(rt,512*1024);ctx=JS_NewContext(rt);if(!ctx)return 1;
- JSValue g=JS_GetGlobalObject(ctx);JS_SetPropertyStr(ctx,g,"nativeRasterBegin",JS_NewCFunction(ctx,js_raster_begin,"nativeRasterBegin",1));JS_SetPropertyStr(ctx,g,"nativeRasterRect",JS_NewCFunction(ctx,js_raster_rect,"nativeRasterRect",5));JS_SetPropertyStr(ctx,g,"nativeRasterLine",JS_NewCFunction(ctx,js_raster_line,"nativeRasterLine",5));JS_SetPropertyStr(ctx,g,"nativeRasterEllipse",JS_NewCFunction(ctx,js_raster_ellipse,"nativeRasterEllipse",6));JS_SetPropertyStr(ctx,g,"nativeRasterField",JS_NewCFunction(ctx,js_raster_field,"nativeRasterField",5));JS_SetPropertyStr(ctx,g,"nativeRasterSample",JS_NewCFunction(ctx,js_raster_sample,"nativeRasterSample",2));JS_SetPropertyStr(ctx,g,"nativeRasterFinish",JS_NewCFunction(ctx,js_raster_finish,"nativeRasterFinish",0));JS_SetPropertyStr(ctx,g,"nativeTime",JS_NewCFunction(ctx,js_time,"nativeTime",0));JS_SetPropertyStr(ctx,g,"nativeDay",JS_NewCFunction(ctx,js_day,"nativeDay",0));JS_SetPropertyStr(ctx,g,"nativeSave",JS_NewCFunction(ctx,js_save,"nativeSave",1));JS_SetPropertyStr(ctx,g,"nativeLoad",JS_NewCFunction(ctx,js_load,"nativeLoad",0));JS_SetPropertyStr(ctx,g,"nativeApi",JS_NewCFunction(ctx,js_api,"nativeApi",3));JS_SetPropertyStr(ctx,g,"nativeInfo",JS_NewCFunction(ctx,js_info,"nativeInfo",0));JS_FreeValue(ctx,g);
+ JSValue g=JS_GetGlobalObject(ctx);JS_SetPropertyStr(ctx,g,"nativeRasterBegin",JS_NewCFunction(ctx,js_raster_begin,"nativeRasterBegin",1));JS_SetPropertyStr(ctx,g,"nativeRasterRect",JS_NewCFunction(ctx,js_raster_rect,"nativeRasterRect",5));JS_SetPropertyStr(ctx,g,"nativeRasterLine",JS_NewCFunction(ctx,js_raster_line,"nativeRasterLine",5));JS_SetPropertyStr(ctx,g,"nativeRasterEllipse",JS_NewCFunction(ctx,js_raster_ellipse,"nativeRasterEllipse",6));JS_SetPropertyStr(ctx,g,"nativeRasterField",JS_NewCFunction(ctx,js_raster_field,"nativeRasterField",5));JS_SetPropertyStr(ctx,g,"nativeRasterSample",JS_NewCFunction(ctx,js_raster_sample,"nativeRasterSample",2));JS_SetPropertyStr(ctx,g,"nativeRasterFinish",JS_NewCFunction(ctx,js_raster_finish,"nativeRasterFinish",0));JS_SetPropertyStr(ctx,g,"nativeTime",JS_NewCFunction(ctx,js_time,"nativeTime",0));JS_SetPropertyStr(ctx,g,"nativeDay",JS_NewCFunction(ctx,js_day,"nativeDay",0));JS_SetPropertyStr(ctx,g,"nativeSave",JS_NewCFunction(ctx,js_save,"nativeSave",1));JS_SetPropertyStr(ctx,g,"nativeLoad",JS_NewCFunction(ctx,js_load,"nativeLoad",0));JS_SetPropertyStr(ctx,g,"nativeApi",JS_NewCFunction(ctx,js_api,"nativeApi",3));JS_SetPropertyStr(ctx,g,"nativeInfo",JS_NewCFunction(ctx,js_info,"nativeInfo",0));JS_SetPropertyStr(ctx,g,"nativeSound",JS_NewCFunction(ctx,js_sound,"nativeSound",2));JS_FreeValue(ctx,g);
  if(!evalfile(argv[1]))return 1;
  char demos_path[1024];snprintf(demos_path,sizeof(demos_path),"%s",argv[1]);char *slash=strrchr(demos_path,'/');
  if(slash)snprintf(slash+1,sizeof(demos_path)-(slash+1-demos_path),"demos.js");else snprintf(demos_path,sizeof(demos_path),"demos.js");
  if(access(demos_path,R_OK)==0&&!evalfile(demos_path))return 1;
  if(!evalfile(argv[2]))return 1;
  int listener=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0),yes=1;setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=INADDR_ANY};if(bind(listener,(void*)&a,sizeof(a))||listen(listener,4)){perror("story HTTP");return 1;}fcntl(listener,F_SETFL,O_NONBLOCK);
- int keys=open("/dev/input/event67",O_RDONLY|O_NONBLOCK|O_CLOEXEC),knob=open("/dev/input/event68",O_RDONLY|O_NONBLOCK|O_CLOEXEC);fprintf(stderr,"storyd ready; local 52x16 scenes, port %d; keys=%d knob=%d\n",port,keys>=0,knob>=0);
+ int keys=open("/dev/input/event67",O_RDONLY|O_NONBLOCK|O_CLOEXEC),knob=open("/dev/input/event68",O_RDONLY|O_NONBLOCK|O_CLOEXEC);fprintf(stderr,"storyd ready; local 52x16 scenes, port %d; keys=%d knob=%d sound=%d\n",port,keys>=0,knob>=0,sound_token[0]!=0);
  double next=mono();metrics_at=next;while(running){
   struct pollfd p[]={{listener,POLLIN,0},{keys,POLLIN,0},{knob,POLLIN,0}};int wait=(int)ceil((next-mono())*1000);poll(p,3,wait<0?0:wait>17?17:wait);
   if(p[0].revents&POLLIN)serve(listener);if(p[1].revents&POLLIN)input(keys,0);if(p[2].revents&POLLIN)input(knob,1);

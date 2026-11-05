@@ -302,13 +302,21 @@ function glass(d,v,c,t){
 }
 
 const renderers={hours,sky,jar,board,glass};
+/* The arrival sound of each scene and the second of the arrival it starts at: the bead's landing, the comet's
+ * start (its bell rings as the star lights), the marble's first touch, the first flap, the pane starting to grow. */
+const SOUNDS={hours:['order-bead',1.3],sky:['order-star',.25],jar:['order-marble',null],board:['order-flaps',0],glass:['order-chime',.2]};
+function cue(id,view){
+ const [name,at]=SOUNDS[id];if(at!==null)return {name,at};
+ const list=view.orders.map(o=>({t:o.t,v:o.v}));if(!list.length)return {name,at:.2};
+ marbles(list,view.count);return {name,at:.2+physics.paths[list.length-1].hit/60};
+}
 /* view: {orders:[{t,v}] paid so far (t = seconds since local midnight, v = value or null), count, now, event:{s}|null} */
 function frame(id,view,theme={},t=0){
  if(!renderers[id])throw Error('Unknown scene '+id);
  const d=surface(),direct=renderers[id](d,view,palette(theme),t);return direct||d.finish();
 }
 function rgb(data){const out=new Uint8Array(W*H*3);for(let i=0;i<data.length;i++){out[i*3]=data[i]>>>16&255;out[i*3+1]=data[i]>>>8&255;out[i*3+2]=data[i]&255;}return out;}
-g.UlanziOrders={W,H,DAY,scenes,frame,rgb,palette,weight};
+g.UlanziOrders={W,H,DAY,scenes,frame,rgb,palette,weight,cue};
 // The compo loops (demos.js) draw with the same rasterizer and palette.
 g.UlanziPixels={W,H,surface,palette,rgb,scale,blend,hsv,hueGap,clamp,ease,part,hash,unit,frac};
 if(typeof module!=='undefined'&&module.exports)module.exports=g.UlanziOrders;

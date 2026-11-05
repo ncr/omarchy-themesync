@@ -28,4 +28,17 @@ let plain=boot();plain.clock(15*3600+120);plain.req('PUT','/state',{day:'2026-11
 let empty=boot();empty.req('POST','/replay',{});assert.equal(empty.req('GET','/status',{}).animation,null);
 let full=boot();full.req('PUT','/state',{day:'2026-11-03',count:450,orders:Array.from({length:100},(_,i)=>[i*840,999999]),revision:1});for(const id of ids){full.req('POST','/scene',{scene:id});assert.equal(full.frame().length,2496);}
 let themed=boot();themed.req('PUT','/palette',{accent:'00ffff',name:'test',secondary:'ff0080'});let writes=themed.saves();themed.req('PUT','/palette',{name:'test',secondary:'ff0080',accent:'00ffff'});assert.equal(themed.saves(),writes);
-console.log('Device: five scenes, controls, burst queue, idempotence, reboot, clock alert return, midnight, order validation, count-only bridge, 100-order state: PASS');
+// Arrival sounds: once per arrival at the scene's cue, silent at night unless replayed by hand, mutable.
+function sounding(saved=null){let t=0,state=saved,wall=15*3600;const played=[];
+ const FakeDate=function(){const s=wall;return {getHours:()=>Math.floor(s/3600),getMinutes:()=>Math.floor(s/60)%60,getSeconds:()=>Math.floor(s)%60,getMilliseconds:()=>0};};
+ const c=vm.createContext({Date:FakeDate,nativeTime:()=>t,nativeDay:()=>'2026-11-03',nativeLoad:()=>state,nativeSave:s=>(state=JSON.parse(s),true),nativeApi:()=>true,nativeInfo:()=>({}),nativeSound:(n,v)=>(played.push([n,v,t]),true)});
+ vm.runInContext(renderer,c);vm.runInContext(app,c);return {req:(...a)=>c.storyRequest(...a),run:s=>{for(let i=0;i<s*30;i++){t+=1/30;c.storyTick();}},at:h=>wall=h*3600,played,control:(k,e)=>c.storyControl(k,e),state:()=>state};}
+let s1=sounding();s1.req('POST','/scene',{scene:'hours'});s1.req('PUT','/state',{day:'2026-11-03',count:1,orders:[[50000,40]],revision:1,animate:true});s1.run(6);
+assert.equal(s1.played.length,1);assert.equal(s1.played[0][0],'order-bead');assert(Math.abs(s1.played[0][2]-1.3)<.05,'the bead sounds as it lands');
+s1.at(23.5);s1.req('PUT','/state',{day:'2026-11-03',count:2,orders:[[50000,40],[84000,10]],revision:2,animate:true});s1.run(6);assert.equal(s1.played.length,1,'no sound at night');
+s1.req('POST','/replay',{});s1.run(6);assert.equal(s1.played.length,2,'a replay by hand sounds at night');
+s1.control('middle','long');assert.equal(s1.req('GET','/status',{}).sound.enabled,false);s1.req('POST','/replay',{});s1.run(6);assert.equal(s1.played.length,2,'muted');
+assert.equal(sounding(s1.state()).req('GET','/status',{}).sound.enabled,false,'mute survives a restart');
+s1.req('PUT','/sound',{enabled:true});assert.equal(s1.req('GET','/status',{}).sound.enabled,true);assert.throws(()=>s1.req('PUT','/sound',{enabled:'yes'}));
+for(const [scene,name] of [['sky','order-star'],['jar','order-marble'],['board','order-flaps'],['glass','order-chime']]){const x=sounding();x.req('POST','/scene',{scene});x.req('PUT','/state',{day:'2026-11-03',count:1,orders:[[50000,40]],revision:1,animate:true});x.run(7);assert.deepEqual(x.played.map(p=>p[0]),[name]);}
+console.log('Device: five scenes, controls, burst queue, idempotence, reboot, clock alert return, midnight, order validation, count-only bridge, 100-order state, arrival sounds: PASS');

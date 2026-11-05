@@ -24,6 +24,8 @@ def main():
  # Upload from the installed host bundle, so a recovered device gets the tested build.
  for name in ('storyd','renderer.js','demos.js','device.js'):adb('push',str(stories/name),'/tmp/tc002/stories/'+name)
  shell('/tmp/busybox cp /tmp/tc002/stories/storyd /tmp/tc002/stories/renderer.js /tmp/tc002/stories/demos.js /tmp/tc002/stories/device.js /data/tc002/stories/')
+ # The sound-only token lives beside the engine's state; without it the scenes stay silent.
+ if (stories/'sound.token').exists():adb('push',str(stories/'sound.token'),'/data/tc002/stories/sound.token');shell('/tmp/busybox chmod 600 /data/tc002/stories/sound.token')
  shell('if [ -f /tmp/tc002/stories.pid ]; then kill -TERM $(cat /tmp/tc002/stories.pid) 2>/dev/null; /tmp/busybox sleep 1; fi; /tmp/busybox chmod 700 /tmp/tc002/stories/storyd; trap "" HUP; /tmp/tc002/stories/storyd /tmp/tc002/stories/renderer.js /tmp/tc002/stories/device.js /data/tc002/state/credentials/tokens /data/tc002/stories/state.json </dev/null >/tmp/tc002/stories.log 2>&1 & echo $! >/tmp/tc002/stories.pid')
  print('Ulanzi RAM scene engine restored.',flush=True)
 if __name__=='__main__':main()
