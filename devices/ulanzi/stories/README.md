@@ -71,7 +71,7 @@ Rollback: stop the paid-order service, stop storyd, restore the recorded runtime
 
 ## Omarchy / Tiny Compo
 
-`demos.js` adds 23 distinct deterministic animations at native 52×16, rendered locally
+`demos.js` adds 28 distinct deterministic animations at native 52×16, rendered locally
 by QuickJS at a target of **60 fps**. A native C rasterizer samples geometry and
 procedural fields on a **4×4 grid per physical pixel**, then reduces coverage to
 52×16 RGB888. Subpixel movement, lines, ellipses, metaball contours and the
@@ -97,10 +97,28 @@ reports measured `fps`, `target_fps`, `render_ms`, and `antialias_samples` in `/
 `render_ms` includes the local HTTP handoff, not just rasterization.
 
 ```
-themesync ulanzi demo                 # automatic 23-entry show (~7 min 16 s)
+themesync ulanzi demo                 # automatic 28-entry show (~7 min 56 s)
 themesync ulanzi demo drive --manual  # loop one animated entry
 themesync ulanzi demo --list          # names, IDs, descriptions and durations
 themesync ulanzi scene garden        # leave the show for the order world
+```
+
+Three short loops use scene colours for water, hot steel and paper, with accents
+from the active theme. Open them individually on a device running the updated
+`demos.js`:
+
+```sh
+themesync ulanzi demo lighthouse --manual  # Night Beacon, 8 s
+themesync ulanzi demo forge --manual       # Ember Forge, 6 s
+themesync ulanzi demo kites --manual       # Kite Festival, 8 s
+```
+
+Two six-second pop-art loops pair bright colour panels with black silhouettes
+and white wired earbuds:
+
+```sh
+themesync ulanzi demo pocket-groove --manual
+themesync ulanzi demo cable-closeup --manual
 ```
 
 In demo mode, **− / +** choose entries and switch to a single animated entry.
@@ -117,14 +135,14 @@ The C host loads sibling `demos.js` between `renderer.js` and `device.js`; older
 installations without it retain order scenes and reject unavailable demo commands.
 `ensure_runtime.py` installs all four files. `POST /demo` accepts an optional `id`,
 `autoplay` boolean, optional `time` in seconds and `paused` boolean for frame inspection, and `enabled:false` to leave the show; `GET /demos` returns the
-23-entry catalogue. The existing authenticated API and fixed-buffer limits apply.
+28-entry catalogue. The existing authenticated API and fixed-buffer limits apply.
 
 Browser gallery: `devices/ulanzi/compo/index.html` is a self-contained preview with
-all 23 entries, seek, play/pause, autoplay, six actual Omarchy palette presets, 8/30/60 FPS comparison, an AA toggle and optional LED grid. Static thumbnails are cached; animated thumbnails run at 10 fps independently of the main 60-fps preview.
+all 28 entries, seek, play/pause, autoplay, six actual Omarchy palette presets, 8/30/60 FPS comparison, an AA toggle and optional LED grid. Static thumbnails are cached; animated thumbnails run at 10 fps independently of the main 60-fps preview.
 It contains no clock/API credentials and does not control the hardware.
 Rebuild it with `python3 devices/ulanzi/compo/build.py`.
 
-Export full-length 8-fps GIFs and a contact sheet (Node + Python/Pillow):
+Export full-length 8-fps GIFs and `contact-sheet.png` (Node + Python/Pillow):
 
 ```
 cd devices/ulanzi/compo

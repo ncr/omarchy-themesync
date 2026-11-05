@@ -25,7 +25,12 @@ const catalogue=[
  ['forever','Omarchy Forever','Typografia, refleksy i ukłon na finał','finał',16],
  ['switchback','Switchback','Dwa mikrosamochody walczą o pozycję na ciasnym owalu','szybkie demo',12],
  ['ricochet','Ricochet','Jasna kula odbija się od zderzaków i łapek pinballa','szybkie demo',12],
- ['afterburner','Afterburner','Przelot przez neonowe bramki z dopalaczem i paralaksą','szybkie demo',12]
+ ['afterburner','Afterburner','Przelot przez neonowe bramki z dopalaczem i paralaksą','szybkie demo',12],
+ ['lighthouse','Night Beacon','Latarnia przeczesuje nocne morze, a fale odsłaniają pianę','nokturn',8],
+ ['forge','Ember Forge','Młot uderza w rozgrzaną stal, iskry gasną nad kowadłem','kuźnia',6],
+ ['kites','Kite Festival','Trzy papierowe latawce kołyszą się z kolorowymi ogonami','papier i wiatr',8],
+ ['pocket-groove','Pocket Groove','Trzy taneczne sylwetki z białymi słuchawkami na neonowych planszach','pop-art',6],
+ ['cable-closeup','Cable Close-up','Biały przewód kołysze się między słuchawką a kieszonkowym odtwarzaczem','pop-art',6]
 ].map((a,i)=>({id:a[0],name:a[1],description:a[2],genre:a[3],duration:a[4],number:i+1}));
 const FONT={A:'010101111101101',B:'110101110101110',C:'011100100100011',D:'110101101101110',E:'111100110100111',F:'111100110100100',G:'011100101101011',H:'101101111101101',I:'111010010010111',J:'001001001101010',K:'101101110101101',L:'100100100100111',M:'101111111101101',N:'101111111111101',O:'010101101101010',P:'110101110100100',Q:'010101101111011',R:'110101110101101',S:'011100010001110',T:'111010010010010',U:'101101101101111',V:'101101101101010',W:'101101111111101',X:'101101010101101',Y:'101101010010010',Z:'111001010100111',0:'111101101101111',1:'010110010010111',2:'111001111100111',3:'111001111001111',4:'101101111001001',5:'111100111001111',6:'111100111101111',7:'111001010010010',8:'111101111101111',9:'111101111001111','>':'100010001010100','/':'001001010100100','-':'000000111000000','.':'000000000000010',':':'000010000010000','_':'000000000000111','+':'000010111010000','!':'010010010000010',' ':'000000000000000'};
 const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v)),mix=(a,b,t)=>a+(b-a)*clamp(t),ease=t=>{t=clamp(t);return t*t*(3-2*t);},part=(t,a,b)=>ease((t-a)/(b-a));
@@ -207,6 +212,176 @@ scenes.afterburner=(d,t,c)=>{
  d.line(x-3,y,x,y,c.gold);
  d.sprite(x-3,y-2,['.AA....','AAAWAA.','.AWWWWW','AAAWAA.','.AA....'],{A:c.a,W:c.white});
  d.p(x+1,y-1,c.blue);
+};
+
+const beaconTower=[
+ '...RRR...', '..RRRRR..', '..WLWLW..', '..WLWLW..', '.RRRRRRR.',
+ '...WSW...', '...WSW...', '...RRR...', '...RRR...', '..WWSWW..', '..WWDWW..'
+];
+scenes.lighthouse=(d,t,c)=>{
+ const a=t*TAU/8;
+ const water=0x287d9f, foam=0x70bed7, stone=0x31445d;
+ const beamY=4+3.6*Math.sin(a);
+ for(let x=13;x<52;x++){
+  const reach=(x-11)/40;
+  const y=mix(3,beamY,reach);
+  d.rect(x,y-.3-reach*1.4,1,1+reach*2.8,shade(water,1.12-reach*.72));
+  d.rect(x,y-.2,1,.8,shade(foam,.9-reach*.63));
+ }
+ d.ellipse(42,1.4,1.55,1.55,shade(c.white,.77),true);
+ d.p(29,1,shade(c.white,.50));
+ d.p(35,3,shade(c.white,.36));
+ d.line(17,10,51,10,shade(water,.65));
+ for(let i=0;i<8;i++){
+  const x=17+(i%4)*9+1.6*Math.sin(a+i*1.7);
+  const y=11.4+Math.floor(i/4)*2.8+.48*Math.sin(a*2+i);
+  d.rect(x,y,4+i%3,1,shade(i%3===0?foam:water,.73+.23*Math.cos(a+i)));
+ }
+ d.sprite(1,11,['.....SSSSSSSS.....','...SSSSSSSSSSSS...','.SSSSSSSSSSSSSSSS.','SSSSSSSSSSSSSSSSSS','SSSSSSSSSSSSSSSSSS'],{S:stone});
+ d.line(4,13,11,13,0x4f677b);
+ d.sprite(6,1,beaconTower,{R:c.red,W:c.white,L:0xffd274,S:0x869ab1,D:stone});
+};
+
+const forgeAnvil=[
+ 'SSSSSSSSSSSSSSSSSSSS', '.MMMMMMMMMMMMMMMMMM.', '..MMMMMMMMMMMMMMM...',
+ '....SSSSSSSSSS......', '......SSSSSS........', '.....MMMMMMMM.......',
+ '....MMMMMMMMMM......'
+];
+const forgeSparks=[
+ [-21,19],[-15,13],[-11,22],[-5,16],[6,20],[11,13],[16,18],[21,15]
+];
+scenes.forge=(d,t,c)=>{
+ const cycle=(t+.28)%6;
+ const beat=cycle%2;
+ const force=[1,.72,.87][Math.floor(cycle/2)];
+ const lift=beat<.55?part(beat,0,.55):1-part(beat,1.45,2);
+ const hot=1-part(beat,0,.73);
+ const steel=0x657185, shadow=0x343e51, ember=0xe75519, gold=0xffba52;
+ d.line(3,15,48,15,shade(c.red,.47));
+ d.sprite(16,9,forgeAnvil,{S:steel,M:shadow});
+ d.rect(22,8,8,1,shade(ember,.75+hot*.25));
+ d.rect(24,8,4,1,shade(gold,.75+hot*.25));
+ const headY=6-5.5*lift*force;
+ d.line(29,headY+1,42,headY+3.8,0x825636);
+ d.line(31,headY+1,42,headY+3.2,0xc18b58);
+ d.rect(22,headY,9,2,steel);
+ d.rect(23,headY,7,1,c.white);
+ d.rect(23,headY+2,7,.6,shadow);
+ for(const [vx,vy] of forgeSparks){
+  const life=clamp(1-beat/.72);
+  if(life===0)break;
+  const x=26+vx*force*beat, y=8-vy*force*beat+23*beat*beat;
+  d.line(x-vx*force*.06,y+(vy*force-46*beat)*.06,x,y,shade(ember,life));
+  d.p(x,y,shade(gold,life));
+ }
+};
+
+const kitePanels=[
+ '....A....','...AAB...','..AAABB..','.AAAABBB.','AAAACBBBB',
+ '.DDDDCCC.','..DDDCC..','...DDC...','....D....'
+];
+scenes.kites=(d,t,c)=>{
+ const a=t*TAU/8;
+ const kites=[
+  [8,5.1,0,0xf57b63,0xffce89],
+  [25,5.8,2.1,0x49c9ba,0xa8f2dd],
+  [42,5.1,4.2,0x9e82f5,0xf0bcf4]
+ ];
+ for(const [cx,cy,phase,paper,highlight] of kites){
+  const angle=a+phase;
+  const x=cx+1.6*Math.sin(angle),y=cy+1.1*Math.cos(angle);
+  const drift=2.5+1.7*Math.sin(angle+.7);
+  const tail=(q)=>[x+drift*q+Math.sin(angle-q*5)*1.5*q,y+4+(11-y)*q];
+  const [tx,ty]=tail(1);
+  d.line(x,y+4,cx-5,15,shade(paper,.48));
+  d.line(x,y+4,...tail(.52),shade(paper,.83));
+  d.line(...tail(.52),tx,ty,shade(paper,.83));
+  for(const q of [.39,.85]){
+   const [bx,by]=tail(q);
+   d.rect(bx-1,by,3,1,highlight);
+  }
+  d.sprite(x-4,y-4,kitePanels,{A:paper,B:highlight,C:shade(paper,.70),D:shade(paper,.47)});
+ }
+ for(const [x,y] of [[1,9],[15,2],[33,11],[48,7]])d.rect(x,y,3,1,shade(c.white,.33));
+};
+
+const earbudsWhite=0xfff6ee;
+const danceCards=[
+ [1,0xf03a84,0,1],
+ [19,0x92db23,1,-1],
+ [37,0x3a8af6,2.4,1]
+];
+function danceSilhouette(d,left,phase,facing){
+ const sway=Math.sin(phase), bounce=(1+Math.cos(phase*2))*.43;
+ const shoulder=[7+.95*sway,5.4-bounce], hip=[7-.55*sway,9-bounce];
+ const head=[shoulder[0]+.35,shoulder[1]-2.85];
+ const hand=[11.6+.6*sway,8.15-1.9*Math.cos(phase)];
+ const raisedHand=[2.3+.7*sway,3.8+2.1*Math.sin(phase+.7)];
+ const x=u=>left+6.5+facing*(u-7);
+ const stroke=(a,b,col=0)=>d.line(x(a[0]),a[1],x(b[0]),b[1],col);
+ const limb=(a,b)=>{
+  stroke(a,b);
+  stroke([a[0]+.63,a[1]],[b[0]+.63,b[1]]);
+ };
+ const forefoot=[9.5+.9*sway,12.8+.8*Math.cos(phase)];
+ const backfoot=[3.65-.5*sway,14];
+ limb(hip,[5.5,11.3]);
+ limb([5.5,11.3],backfoot);
+ limb(hip,[9.4,10.9]);
+ limb([9.4,10.9],forefoot);
+ stroke([backfoot[0]-1.15,backfoot[1]],backfoot);
+ stroke(forefoot,[forefoot[0]+1.25,forefoot[1]]);
+ limb(shoulder,[3.85,6.45-bounce]);
+ limb([3.85,6.45-bounce],raisedHand);
+ limb(shoulder,[9.9,7.6-bounce]);
+ limb([9.9,7.6-bounce],hand);
+ d.ellipse(x(shoulder[0]-.25),6.65-bounce,1.9,2.4,0,true);
+ d.ellipse(x(head[0]),head[1],1.67,1.72,0,true);
+ d.p(x(head[0]+1.55),head[1]+.2,0);
+ d.ellipse(x(hand[0])+.3,hand[1]+.55,1.43,1.75,0,true);
+ const bud=[head[0]-.1,head[1]+.35], slack=[7.75-.7*sway,7.3-bounce];
+ stroke(bud,slack,earbudsWhite);
+ stroke(slack,hand,earbudsWhite);
+ d.p(x(bud[0]),bud[1],earbudsWhite);
+ d.rect(x(hand[0])-.5,hand[1]-.7,1.7,2.45,earbudsWhite);
+}
+scenes['pocket-groove']=(d,t)=>{
+ const a=(t%6)*TAU/6;
+ for(const [left,color,phase,facing] of danceCards){
+  d.rect(left,1,14,14,color);
+  danceSilhouette(d,left,a*4+phase+.24*Math.sin(a),facing);
+ }
+};
+
+const listeningProfile=[
+ '...XXXXXX.......','..XXXXXXXXX.....','.XXXXXXXXXXX....','.XXXXXXXXXXX....',
+ '.XXXXXXXXXXXX...','.XXXXXXXXXXXXX..','.XXXXXXXXXXXX...','..XXXXXXXXXXX...',
+ '...XXXXXXXXX....','....XXXXXX......','....XXXXXXX.....','..XXXXXXXXXXX...',
+ '.XXXXXXXXXXXXXX.','XXXXXXXXXXXXXXXX'
+];
+scenes['cable-closeup']=(d,t)=>{
+ const a=(t%6)*TAU/6;
+ const headX=6+.75*Math.sin(a*2), headY=1;
+ const playerX=37+.6*Math.cos(a*2), playerY=3.75+.85*Math.sin(a*2+.8);
+ const earX=headX+7, earY=headY+6;
+ const bendX=25+1.45*Math.cos(a), bendY=12.5+1.2*Math.sin(a*2);
+ d.rect(2,1,48,14,0x8a30d2);
+ d.rect(29,1,21,14,0xd5378a);
+ d.sprite(headX,headY,listeningProfile,{X:0});
+ const cord=(offset,color)=>{
+  d.line(earX,earY+offset,earX+.9,earY+3.2+offset,color);
+  d.line(earX+.9,earY+3.2+offset,bendX,bendY+offset,color);
+  d.line(bendX,bendY+offset,32.5,bendY-.2+offset,color);
+  d.line(32.5,bendY-.2+offset,playerX+2.5,playerY+1.2+offset,color);
+ };
+ for(const offset of [-1,-.5,0,.5,1])cord(offset,0x1c1026);
+ for(const offset of [-.22,.22])cord(offset,earbudsWhite);
+ d.rect(earX-.5,earY-.8,2.2,1.5,earbudsWhite);
+ d.rect(playerX-1,playerY-1,8,11,0);
+ d.rect(playerX,playerY,6,9,earbudsWhite);
+ d.rect(playerX+1,playerY+1,4,2,0x41304b);
+ d.p(playerX+1+Math.floor(t*4)%4,playerY+1,0xf7a4d3);
+ d.ellipse(playerX+2.5,playerY+5.75,1.7,1.7,0x887489);
 };
 
 function frame(id,t=0,theme={},options={}){const meta=catalogue.find(s=>s.id===id);if(!meta)throw Error('Unknown demo '+id);const d=surface(options.antialias!==false),c=palette(theme);t=Math.max(0,t);if(options.title&&t<1.15){d.text(String(meta.number).padStart(2,'0'),1,1,c.a);let words=meta.name.toUpperCase().split(' '),line=words[0].slice(0,11),second=words.slice(1).join(' ').slice(0,12);d.text(line,11,1,c.b);d.text(second||'TINY COMPO',2,9,c.a);}else scenes[id](d,options.title?t-1.15:t,c);return d.finish();}

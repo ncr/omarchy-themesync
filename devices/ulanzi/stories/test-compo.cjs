@@ -1,12 +1,18 @@
 const fs=require('node:fs'),assert=require('node:assert/strict'),vm=require('node:vm'),crypto=require('node:crypto');
 const demo=require('./demos.js'),base=__dirname+'/';
 const frames=new Set(),stats=[];let total=0;
-assert.equal(demo.catalogue.length,23);assert.equal(new Set(demo.catalogue.map(x=>x.id)).size,23);
+assert.equal(demo.catalogue.length,28);assert.equal(new Set(demo.catalogue.map(x=>x.id)).size,demo.catalogue.length);
+for(const id of ['lighthouse','forge','kites','pocket-groove','cable-closeup']){
+ const {duration}=demo.catalogue.find(entry=>entry.id===id);
+ for(const t of [0,.125,1.25,duration-.125]){
+  assert.deepEqual(demo.frame(id,t),demo.frame(id,t+duration),id+' must repeat at its catalogue duration');
+ }
+}
 for(const m of demo.catalogue){let unique=new Set(),min=832,max=0;for(let i=0;i<m.duration*8;i++){let a=demo.frame(m.id,i/8);assert.equal(a.length,832);let lit=0;for(const c of a){assert(Number.isInteger(c)&&c>=0&&c<=0xffffff);if(c)lit++;}min=Math.min(min,lit);max=Math.max(max,lit);assert(lit>8&&lit<750,`${m.id}: empty or flooded frame`);let hash=crypto.createHash('sha256').update(Buffer.from(demo.rgb(a))).digest('hex');unique.add(hash);frames.add(hash);total++;}assert(unique.size>=20,m.id+' barely animates');stats.push({id:m.id,unique:unique.size,min,max});}
 function boot(saved=null){let t=0,state=saved,writes=0;let c=vm.createContext({nativeTime:()=>t,nativeDay:()=>'2026-11-03',nativeLoad:()=>state,nativeSave:s=>(state=JSON.parse(s),writes++,true),nativeApi:()=>true,nativeInfo:()=>({})});for(const p of [base+'renderer.js',base+'demos.js',base+'device.js'])vm.runInContext(fs.readFileSync(p,'utf8'),c);return {req:(...a)=>c.storyRequest(...a),tick:()=>c.storyTick(),step:s=>{for(let i=0;i<s*8;i++){t+=.125;c.storyTick();}},state:()=>state,writes:()=>writes};}
 let b=boot();b.req('PUT','/state',{day:'2026-11-03',count:12,revision:1,animate:false});b.req('POST','/demo',{id:'boot',autoplay:true});let w=b.writes();b.step(18);assert.equal(b.req('GET','/status',{}).compo.id,'bonsai');assert.equal(b.writes(),w,'autoplay must not write flash');assert.equal(b.req('GET','/status',{}).count,12);
 for(const id of demo.catalogue.map(x=>x.id)){b.req('POST','/demo',{id,autoplay:false});assert.equal(b.tick().length,2496);b.step(2);assert.equal(b.req('GET','/status',{}).compo.id,id);}
-b.req('POST','/input',{control:'right',event:'click'});assert.equal(b.req('GET','/status',{}).compo.id,'boot');b.req('POST','/input',{control:'left',event:'click'});assert.equal(b.req('GET','/status',{}).compo.id,'afterburner');
+b.req('POST','/input',{control:'right',event:'click'});assert.equal(b.req('GET','/status',{}).compo.id,'boot');b.req('POST','/input',{control:'left',event:'click'});assert.equal(b.req('GET','/status',{}).compo.id,demo.catalogue.at(-1).id);
 let restored=boot(b.state());assert.equal(restored.req('GET','/status',{}).mode,'compo');assert.equal(restored.req('GET','/status',{}).count,12);
 for(const mode of ['stories','clock','compo']){restored.req('POST','/input',{control:'middle',event:'click'});assert.equal(restored.req('GET','/status',{}).mode,mode);}
 restored.req('PUT','/state',{day:'2026-11-03',count:13,revision:2,animate:true});assert(restored.req('GET','/status',{}).animation);restored.step(61);assert.equal(restored.req('GET','/status',{}).mode,'compo');assert.equal(restored.req('GET','/status',{}).animation,null);assert.equal(restored.req('GET','/status',{}).count,13);
